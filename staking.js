@@ -25,6 +25,18 @@ export function normAddr(a) { return String(a || '').replace(/\s+/g, '').toUpper
 const STAKING_NORM = normAddr(STAKING_CONTRACT_ADDRESS);
 export function isStakingContract(addr) { return normAddr(addr) === STAKING_NORM; }
 
+// Block rewards (validator/staking reward inherents) are surfaced by the history as transactions
+// whose SENDER is the protocol coinbase address — Policy.COINBASE_ADDRESS, "the address we use to
+// denote that some coins originated from a coinbase event." Read that address once from
+// Policy.COINBASE_ADDRESS, pass it here normalized via normAddr(). Counts only when the reward is
+// credited to the user: paid to an owned address, or restaked to the contract crediting our staker.
+export function isCoinbaseReward(tx, coinbaseNorm, ownSet) {
+  if (!coinbaseNorm || normAddr(tx?.sender) !== coinbaseNorm) return false;
+  const recipientOwned = ownSet.has(normAddr(tx?.recipient));
+  const stakerOwned = !!tx?.data && 'staker' in tx.data && ownSet.has(normAddr(tx.data.staker));
+  return recipientOwned || stakerOwned;
+}
+
 // Incoming staking-op codes (first byte of raw recipient data) -> canonical type string.
 const INCOMING_OP_BY_BYTE = {
   '00': 'create-validator', '01': 'update-validator', '02': 'deactivate-validator',

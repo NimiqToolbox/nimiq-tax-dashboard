@@ -103,14 +103,19 @@ Nimiq Albatross staking is detected directly from on-chain data — no external 
 - **Stake and unstake are treated as tax-neutral transfers** — moving your own NIM into or out of
   the staking contract isn't a disposal, so it no longer shows up as a phantom sale, and the
   original cost basis carries through.
-- **Restaked rewards are counted as income** at the day's NIM price (and establish a cost basis for
-  later disposals). They're detected as `add-stake` transactions sent by the validator/pool that
-  credit your stake.
+- **Rewards are counted as income** at the day's NIM price (and establish a cost basis for later
+  disposals). Two on-chain forms are detected:
+  - **Validator / block rewards** — paid by the protocol to a validator's reward address. The
+    history surfaces these as transactions whose sender is the coinbase address
+    (`Policy.COINBASE_ADDRESS`, _"the address we use to denote that some coins originated from a
+    coinbase event"_).
+  - **Restaked rewards** — `add-stake` transactions a validator/pool sends to compound a reward
+    back into your stake.
 
-**Limitations** (inherent to an on-chain, light-client tool, no indexer): rewards paid *directly*
-to your wallet look like ordinary incoming transfers and aren't auto-classified as rewards; and raw
-validator block-reward *inherents* aren't exposed by the light client at all. Reconcile those
-manually if they apply to you.
+**Limitation:** rewards a pool pays out _off-chain_ (a plain transfer from the pool's wallet to
+yours) look identical to any other incoming transfer, so they can't be auto-classified as rewards —
+they're still counted as received NIM, just not flagged as staking income. Reconcile those manually
+if they apply to you.
 
 ## Disclaimer
 

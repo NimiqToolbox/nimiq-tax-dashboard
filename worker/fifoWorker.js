@@ -1,5 +1,5 @@
 import { getAllTransactions, getPrice, saveRealized, saveGainsSummary } from '../storage.js';
-import { classifyStaking, normAddr } from '../staking.js';
+import { classifyStaking, normAddr, isCoinbaseReward } from '../staking.js';
 
 function formatDateStr(ts) {
   const d = new Date(ts * 1000);
@@ -10,13 +10,14 @@ function formatDateStr(ts) {
 }
 
 self.onmessage = async (e) => {
-  const { addresses } = e.data;
+  const { addresses, coinbase } = e.data;
   if (!addresses?.length) {
     self.postMessage({ error: 'No addresses' });
     return;
   }
   const addressSet = new Set(addresses.map(a => a.toLowerCase()));
   const ownNorm = new Set(addresses.map(normAddr)); // staking classification (space/case-insensitive)
+  const coinbaseNorm = coinbase ? normAddr(coinbase) : null; // Policy.COINBASE_ADDRESS, for block rewards
   try {
     const txs = await getAllTransactions();
     // sort oldest -> newest by timestamp (we stored __timestamp)
@@ -66,9 +67,11 @@ self.onmessage = async (e) => {
       }
       if (price === undefined) continue; // still no price within 5 days -> skip
 
-      // Restaked staking reward: ordinary income at the day's fair value, and it establishes a
-      // cost-basis lot so a later disposal is taxed only on the change in value since receipt.
-      if (staking && staking.kind === 'reward') {
+      // Staking rewards are ordinary income at the day's fair value, and establish a cost-basis lot
+      // so a later disposal is taxed only on the change since receipt. Two on-chain forms:
+      //  • restaked reward — an add-stake the validator/pool sends crediting our stake (kind 'reward');
+      //  • coinbase reward — a block reward whose sender is the protocol coinbase address.
+      if ((staking && staking.kind === 'reward') || isCoinbaseReward(tx, coinbaseNorm, ownNorm)) {
         lots.push({ remaining: nimValue, costPer: price });
         const y = dateStr.split('-')[2];
         stakingIncomeByYear[y] = (stakingIncomeByYear[y] || 0) + nimValue * price;

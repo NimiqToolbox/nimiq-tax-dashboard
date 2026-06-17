@@ -3,11 +3,11 @@
 // Ensure you are hosting this page over HTTP(S); loading from the file:// protocol won\'t work
 // because the WASM file needs to be fetched.
 
-import init, { Client, ClientConfiguration } from './nimiq-core/index.js';
+import init, { Client, ClientConfiguration, Policy } from './nimiq-core/index.js';
 import { saveTransactions, getPrice, savePrices, getGainsSummary, getAllTransactions, getTransactionsForAddresses } from './storage.js';
 import { toCsv, downloadCsv } from './export.js';
 import Identicons from './design/assets/iqons.bundle.min.js';
-import { classifyStaking } from './staking.js';
+import { classifyStaking, isCoinbaseReward } from './staking.js';
 
 // Start price worker
 const priceWorker = new Worker('./worker/priceWorker.js?v=' + Date.now(), { type: 'module' });
@@ -504,6 +504,9 @@ async function lookup() {
   clearTable();
   try {
     const client = await getClient();
+    // The protocol coinbase address marks block-reward coins; read once (WASM is initialised now).
+    const coinbaseAddr = (() => { try { return Policy.COINBASE_ADDRESS; } catch (_) { return null; } })();
+    const coinbaseNorm = coinbaseAddr ? normAddr(coinbaseAddr) : null;
     status('Querying transactions…');
 
     const txMap = new Map(); // hash -> tx
@@ -574,9 +577,10 @@ async function lookup() {
       // Swap (HTLC) takes precedence; otherwise check staking-contract interactions.
       const swap = classifySwap(tx);
       const staking = swap ? null : classifyStaking(tx, ownNorm);
+      const coinbaseReward = (!swap && !staking) && isCoinbaseReward(tx, coinbaseNorm, ownNorm);
       tx.__swap = swap || undefined;
       tx.__staking = staking || undefined;
-      const isReward = staking?.kind === 'reward'; // a restaked reward credited to us (income, +)
+      const isReward = staking?.kind === 'reward' || coinbaseReward; // reward credited to us (income, +)
       const counterparty = outgoing ? recipient : sender; // the "other" party (HTLC / contract / validator)
       const signClass = (incoming || isReward) ? 'amt-in' : outgoing ? 'amt-out' : '';
       const sign = (incoming || isReward) ? '+' : outgoing ? '-' : '';
@@ -619,6 +623,13 @@ async function lookup() {
         pill.textContent = staking.label;
         pill.title = stakingTitle(staking);
         dir.appendChild(pill);
+      } else if (coinbaseReward) {
+        row.classList.add('staking');
+        const pill = document.createElement('span');
+        pill.className = 'dir reward';
+        pill.textContent = 'Staking reward';
+        pill.title = "Block reward from the protocol coinbase — counted as income at the day's NIM price";
+        dir.appendChild(pill);
       } else if (internal) dir.innerHTML = '<span class="dir internal">Internal</span>';
       else if (isOut) dir.innerHTML = '<span class="dir out">Out</span>';
       else if (isIn) dir.innerHTML = '<span class="dir in">In</span>';
@@ -655,7 +666,7 @@ async function lookup() {
     status(`${txs.length} transaction(s) loaded across ${addresses.length} address(es).`, 'success');
 
     // Trigger FIFO calculation (non-blocking)
-    fifoWorker.postMessage({ addresses });
+    fifoWorker.postMessage({ addresses, coinbase: coinbaseAddr });
   } catch (err) {
     console.error(err);
     status('Error: ' + (err.message || err), 'error');
