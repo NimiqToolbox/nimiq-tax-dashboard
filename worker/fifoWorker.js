@@ -1,5 +1,5 @@
 import { getAllTransactions, getPrice, saveRealized, saveGainsSummary } from '../storage.js';
-import { classifyStaking, normAddr, isCoinbaseReward, isPoolReward } from '../staking.js';
+import { classifyStaking, normAddr, isCoinbaseReward, isPoolReward, htlcAddressOf } from '../staking.js';
 
 function formatDateStr(ts) {
   const d = new Date(ts * 1000);
@@ -24,17 +24,23 @@ self.onmessage = async (e) => {
     // sort oldest -> newest by timestamp (we stored __timestamp)
     txs.sort((a, b) => (a.__timestamp || 0) - (b.__timestamp || 0));
 
-    // Atomic-swap HTLC legs. A funding+refund pair is a round-trip of the user's own NIM
-    // through a FAILED swap, so we treat both legs as tax-neutral (no disposal, no
-    // acquisition). Successful swaps keep their normal treatment: funding = disposal,
-    // redeem-in = acquisition.
-    const isFunding = (tx) => tx.recipientType === 'htlc' || tx.data?.type === 'htlc';
-    const isRefund = (tx) => tx.senderType === 'htlc'
-      && (tx.proof?.type === 'timeout-resolve' || tx.proof?.type === 'early-resolve');
-    const refundedHtlcs = new Set();
+    // HTLC legs (atomic swaps AND Nimiq Pay), linked by contract address via a proof-type-agnostic
+    // fund-flow model:
+    //   • funded by us + funds returned to an owned address   -> recovered  => tax-neutral
+    //   • funded by us + still held in the contract (pending) -> not yet disposed => tax-neutral
+    //   • funded by us + emptied to someone else (settled)    -> the coins left => DISPOSAL
+    //   • resolution paid to us from an HTLC we did NOT fund  -> received => ACQUISITION
+    // "recovered" is detected from our own history; pending-vs-settled comes from tx.__htlcStatus,
+    // which the main thread sets by probing the HTLC account balance (it has the client; we don't).
+    const isHtlcFunding = (tx) => tx.recipientType === 'htlc' || tx.data?.type === 'htlc';
+    const isHtlcResolve = (tx) => tx.senderType === 'htlc';
+    const htlcFundedByUser = new Set();
+    const htlcResolvedToOwned = new Set();
     for (const tx of txs) {
-      if (isRefund(tx)) refundedHtlcs.add((tx.sender || '').toLowerCase()); // sender = HTLC address
+      if (isHtlcFunding(tx) && ownNorm.has(normAddr(tx.sender))) htlcFundedByUser.add(htlcAddressOf(tx));
+      if (isHtlcResolve(tx) && ownNorm.has(normAddr(tx.recipient))) htlcResolvedToOwned.add(htlcAddressOf(tx));
     }
+    let htlcRecovered = 0, htlcPending = 0, htlcSettled = 0;
 
     const lots = [];// queue of { remaining_luna, cost_usd_per_nim }
     const realizedRows = [];
@@ -46,9 +52,18 @@ self.onmessage = async (e) => {
       const internal = senderIn && recipientIn;
       if (internal) continue; // ignore
 
-      // Tax-neutral: drop refund legs and the fundings of refunded (failed) swaps.
-      if (isRefund(tx)) continue;
-      if (isFunding(tx) && refundedHtlcs.has((tx.recipient || '').toLowerCase())) continue;
+      // HTLC legs (swap / Nimiq Pay) — fund-flow model (see above).
+      if (isHtlcFunding(tx)) {
+        const h = htlcAddressOf(tx);
+        const st = htlcResolvedToOwned.has(h) ? 'recovered' : (tx.__htlcStatus || 'settled');
+        if (st === 'recovered') { htlcRecovered++; continue; } // came back to us -> neutral
+        if (st === 'pending')   { htlcPending++;   continue; } // still in the contract -> not yet disposed
+        htlcSettled++; // settled to the recipient -> falls through to the disposal path below
+      } else if (isHtlcResolve(tx)) {
+        const h = htlcAddressOf(tx);
+        if (htlcFundedByUser.has(h) && ownNorm.has(normAddr(tx.recipient))) continue; // recovery of our own funds -> neutral
+        // else: paid to us from an HTLC we didn't fund -> received -> acquisition (falls through)
+      }
 
       // Staking. Tax treatment differs from a plain transfer, so classify before the
       // acquisition/disposal logic. stake-in / unstake / admin are tax-neutral: the user keeps
@@ -129,7 +144,10 @@ self.onmessage = async (e) => {
     await saveRealized(realizedRows);
     await saveGainsSummary(summaryArr);
 
-    self.postMessage({ ok: true, summary: summaryArr });
+    if (htlcSettled || htlcPending) {
+      console.debug(`[htlc] recovered=${htlcRecovered} pending=${htlcPending} settled(disposals)=${htlcSettled}`);
+    }
+    self.postMessage({ ok: true, summary: summaryArr, htlc: { recovered: htlcRecovered, pending: htlcPending, settled: htlcSettled } });
   } catch (err) {
     self.postMessage({ error: err.message || err.toString() });
   }

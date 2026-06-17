@@ -70,6 +70,15 @@ export function isPayAppHtlc(tx, hashRoot) {
   return typeof pk === 'string' && NIMIQ_PAY_COSIGNERS.has(pk.toLowerCase());
 }
 
+// The HTLC contract address a transaction touches (normalized): the recipient when it FUNDS an
+// HTLC, the sender when it RESOLVES one. null for non-HTLC transactions. Used to link a funding to
+// its resolution by contract address (proof-type-agnostic), for the fund-flow tax model.
+export function htlcAddressOf(tx) {
+  if (tx?.recipientType === 'htlc' || tx?.data?.type === 'htlc') return normAddr(tx?.recipient);
+  if (tx?.senderType === 'htlc') return normAddr(tx?.sender);
+  return null;
+}
+
 // kind: 'funding' (NIM into a new HTLC, out) | 'redeem' (taken out with the secret, in) |
 //       'refund' (timed out / recovered, in). payApp === true marks a Nimiq Pay HTLC, not a swap.
 export function classifySwap(tx, htlcHashRoots) {

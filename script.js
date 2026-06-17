@@ -7,7 +7,7 @@ import init, { Client, ClientConfiguration, Policy } from './nimiq-core/index.js
 import { saveTransactions, getPrice, savePrices, getGainsSummary, getAllTransactions, getTransactionsForAddresses } from './storage.js';
 import { toCsv, downloadCsv } from './export.js';
 import Identicons from './design/assets/iqons.bundle.min.js';
-import { classifyStaking, isCoinbaseReward, isPoolReward, classifySwap } from './staking.js';
+import { classifyStaking, isCoinbaseReward, isPoolReward, classifySwap, htlcAddressOf } from './staking.js';
 
 // Start price worker
 const priceWorker = new Worker('./worker/priceWorker.js?v=' + Date.now(), { type: 'module' });
@@ -168,6 +168,19 @@ function lookupSwapAsset(htlcAddress) {
   return swapAssetCache.get(htlcAddress);
 }
 
+// Tax-treatment note for an HTLC (swap / Nimiq Pay) row, from the per-HTLC fund-flow analysis.
+function htlcFlowNote(tx, kind, htlcStatus, htlcFunded) {
+  if (kind === 'funding') {
+    const s = htlcStatus.get(normAddr(tx.recipient));
+    return s === 'recovered' ? 'recovered later — tax-neutral'
+      : s === 'pending' ? 'still held in the contract — not taxed yet'
+      : 'settled to the recipient — counts as a disposal';
+  }
+  return htlcFunded.has(normAddr(tx.sender))
+    ? 'recovery of your own funds — tax-neutral'
+    : 'received — counts as an acquisition';
+}
+
 // Human tooltip explaining the tax treatment of a staking row.
 function stakingTitle(s) {
   switch (s.kind) {
@@ -272,18 +285,18 @@ exportGainsBtn.addEventListener('click', async () => {
 // FIFO worker
 const fifoWorker = new Worker('./worker/fifoWorker.js?v=' + Date.now(), { type: 'module' });
 fifoWorker.onmessage = (e) => {
-  const { summary, error } = e.data;
+  const { summary, error, htlc } = e.data;
   if (error) {
     console.warn('FIFO worker error', error);
     status('FIFO calc failed', 'error');
     return;
   }
   if (summary) {
-    renderSummary(summary);
+    renderSummary(summary, htlc);
   }
 };
 
-function renderSummary(summaryArr) {
+function renderSummary(summaryArr, htlc) {
   summaryArr.sort((a, b) => a.year - b.year);
   let html = '<section class="panel">';
   html += '<h2 class="panel-title">Yearly gains (FIFO)</h2>';
@@ -299,6 +312,13 @@ function renderSummary(summaryArr) {
   });
   html += '</tbody></table>';
   html += '<p class="card-note">FIFO method · capital gains from disposals; staking rewards counted as income at the day\'s price; stake/unstake transfers are tax-neutral · disposals without a prior tracked acquisition use a zero cost basis · not tax advice.</p>';
+  if (htlc && (htlc.settled || htlc.pending || htlc.recovered)) {
+    const parts = [];
+    if (htlc.recovered) parts.push(`${htlc.recovered} recovered (neutral)`);
+    if (htlc.pending) parts.push(`${htlc.pending} still pending (not taxed yet)`);
+    if (htlc.settled) parts.push(`${htlc.settled} settled — counted as disposals`);
+    html += `<p class="card-note">HTLC payments/swaps you funded: ${parts.join(' · ')}.</p>`;
+  }
   html += '</section>';
   summaryEl.innerHTML = html;
   exportGainsBtn.disabled = false;
@@ -555,18 +575,46 @@ async function lookup() {
     // Ensure any missing dates are fetched individually (fallback)
     await Promise.all(Array.from(dateSet).map(fetchNimPrice));
 
+    // --- HTLC fund-flow analysis (atomic swaps + Nimiq Pay) ---------------------------------------
+    // Link each HTLC's funding to its resolution by contract address. For fundings that did NOT come
+    // back to us, ask the chain whether the contract still holds the funds (pending) or was emptied
+    // (settled to the recipient = a disposal). The client lives here; the FIFO worker consumes the
+    // resulting per-funding `tx.__htlcStatus`. Also collects hashRoots for Pay-app detection.
+    const htlcHashRoots = new Map();       // normAddr(HTLC) -> hashRoot
+    const htlcFunded = new Map();          // normAddr(HTLC) -> HTLC address (funded by us)
+    const htlcResolvedToOwned = new Set(); // normAddr(HTLC) where funds returned to an owned address
+    for (const tx of txs) {
+      const isFund = tx.recipientType === 'htlc' || tx.data?.type === 'htlc';
+      const isResolve = tx.senderType === 'htlc';
+      if (isFund && tx.recipient) {
+        if (tx.data?.hashRoot != null) htlcHashRoots.set(normAddr(tx.recipient), tx.data.hashRoot);
+        if (ownNorm.has(normAddr(tx.sender))) htlcFunded.set(normAddr(tx.recipient), tx.recipient);
+      }
+      if (isResolve && tx.sender && ownNorm.has(normAddr(tx.recipient))) htlcResolvedToOwned.add(normAddr(tx.sender));
+    }
+    const htlcStatus = new Map(); // normAddr(HTLC) -> 'recovered' | 'pending' | 'settled'
+    for (const [h] of htlcFunded) if (htlcResolvedToOwned.has(h)) htlcStatus.set(h, 'recovered');
+    const htlcToProbe = [...htlcFunded.entries()].filter(([h]) => !htlcResolvedToOwned.has(h));
+    if (htlcToProbe.length) {
+      status(`Checking ${htlcToProbe.length} payment contract(s)…`);
+      await mapLimit(htlcToProbe, 6, async ([h, addr]) => {
+        try {
+          const acc = await client.getAccount(addr);
+          htlcStatus.set(h, acc && acc.balance > 0 ? 'pending' : 'settled');
+        } catch (_) {
+          htlcStatus.set(h, 'settled'); // can't read the contract -> assume it resolved out of our wallet
+        }
+      });
+    }
+    for (const tx of txs) {
+      if (tx.recipientType === 'htlc' || tx.data?.type === 'htlc') {
+        tx.__htlcStatus = htlcStatus.get(normAddr(tx.recipient)) || 'settled';
+      }
+    }
+
     // Save fetched txs to DB (fire & forget)
     saveTransactions(txs).catch(console.error);
     exportTxBtn.disabled = false;
-
-    // Map each HTLC address to its hashRoot from funding txs, so a refund/recovery leg (whose proof
-    // omits the hash) can still be told apart: all-zeroes hashRoot => Nimiq Pay app HTLC, not a swap.
-    const htlcHashRoots = new Map();
-    for (const tx of txs) {
-      if (tx.data?.type === 'htlc' && tx.data.hashRoot != null && tx.recipient) {
-        htlcHashRoots.set(normAddr(tx.recipient), tx.data.hashRoot);
-      }
-    }
 
     // Populate table (peer-centric: one counterparty per row)
     for (const tx of txs) {
@@ -610,25 +658,26 @@ async function lookup() {
         const pill = document.createElement('span');
         pill.className = 'dir pay';
         pill.textContent = label;
-        pill.title = 'Nimiq Pay app HTLC (recovery contract) — not an atomic swap';
+        pill.title = 'Nimiq Pay app HTLC — not an atomic swap · ' + htlcFlowNote(tx, swap.kind, htlcStatus, htlcFunded);
         dir.appendChild(pill);
       } else if (swap) {
         row.classList.add('swap');
         const base = swap.kind === 'funding' ? 'Swap out' : swap.kind === 'redeem' ? 'Swap in' : 'Swap refund';
         const arrow = swap.kind === 'funding' ? '→' : swap.kind === 'redeem' ? '←' : '↺';
+        const flow = htlcFlowNote(tx, swap.kind, htlcStatus, htlcFunded);
         const pill = document.createElement('span');
         pill.className = swap.kind === 'refund' ? 'dir refund' : 'dir swap';
         pill.textContent = base;
-        pill.title = 'Atomic-swap HTLC — resolving counter-asset via Fastspot…';
+        pill.title = `Atomic-swap HTLC · ${flow} · resolving counter-asset via Fastspot…`;
         dir.appendChild(pill);
         const htlcAddr = swap.kind === 'funding' ? tx.recipient : tx.sender;
         lookupSwapAsset(htlcAddr).then(asset => {
           if (asset) {
             tx.__swap.counterAsset = asset;
             pill.textContent = `${base} ${arrow} ${asset}`;
-            pill.title = `Atomic swap NIM ${arrow} ${asset} (resolved via Fastspot)`;
+            pill.title = `Atomic swap NIM ${arrow} ${asset} · ${flow}`;
           } else {
-            pill.title = 'Atomic-swap HTLC (counter-asset unavailable from Fastspot)';
+            pill.title = `Atomic-swap HTLC · ${flow} (counter-asset unavailable from Fastspot)`;
           }
         });
       } else if (staking) {
