@@ -28,15 +28,21 @@ const tbody = table.querySelector('tbody');
 const button = document.getElementById('lookup-btn');
 const addressInput = document.getElementById('address-input');
 const poolInput = document.getElementById('pool-input');
+const limitInput = document.getElementById('limit-input');
+let activeLimit = 0; // newest-N preview cap currently in effect (0 = full history)
 const summaryEl = document.getElementById('summary');
 const exportTxBtn = document.getElementById('export-tx');
 const exportGainsBtn = document.getElementById('export-gains');
 const txSection = document.getElementById('tx-section');
 
-// Remember the optional pool payout addresses in this browser across reloads.
+// Remember the optional pool payout addresses + preview limit in this browser across reloads.
 if (poolInput) {
   const savedPools = localStorage.getItem('nimiq-tax-pool-addresses');
   if (savedPools) poolInput.value = savedPools;
+}
+if (limitInput) {
+  const savedLimit = localStorage.getItem('nimiq-tax-limit');
+  if (savedLimit) limitInput.value = savedLimit;
 }
 
 // ---- Address / identicon helpers (Nimiq design system) ----
@@ -212,7 +218,7 @@ async function mapLimit(items, limit, fn) {
 }
 
 const HISTORY_PAGE = 100; // the Nimiq core's supported max per query (the wallet caps here too)
-async function fetchAddressHistory(client, addr, onProgress) {
+async function fetchAddressHistory(client, addr, onProgress, maxCount) {
   // What we already have, newest-first. We pass a bounded slice (<= page size) as
   // knownTransactions so the client skips re-deriving them — but never more than the cap,
   // which is what triggers "maximum number of transactions exceeds the one supported".
@@ -228,6 +234,7 @@ async function fetchAddressHistory(client, addr, onProgress) {
 
   let startAt;
   let prevOldest = null;
+  let fetched = 0;
   while (true) {
     let page;
     try {
@@ -254,6 +261,9 @@ async function fetchAddressHistory(client, addr, onProgress) {
       oldest = h;
     }
     if (onProgress && added) onProgress(added);
+
+    fetched += page.length;
+    if (maxCount && fetched >= maxCount) break; // preview: stop once we have the newest maxCount
 
     if (oldest === prevOldest) break;   // node didn't advance — avoid looping
     prevOldest = oldest;
@@ -318,6 +328,9 @@ function renderSummary(summaryArr, htlc) {
     if (htlc.pending) parts.push(`${htlc.pending} still pending (not taxed yet)`);
     if (htlc.settled) parts.push(`${htlc.settled} settled — counted as disposals`);
     html += `<p class="card-note">HTLC payments/swaps you funded: ${parts.join(' · ')}.</p>`;
+  }
+  if (activeLimit) {
+    html += `<p class="card-note">⚠️ Preview limited to the newest ${activeLimit} transactions — gains are incomplete (missing older cost basis and possibly some HTLC recovery legs).</p>`;
   }
   html += '</section>';
   summaryEl.innerHTML = html;
@@ -516,6 +529,10 @@ async function lookup() {
   const poolAddrs = poolRaw.split(/\n+/).map(a => a.trim()).filter(Boolean);
   const poolNorm = new Set(poolAddrs.map(normAddr)); // declared pool payout addresses → reward income
   try { localStorage.setItem('nimiq-tax-pool-addresses', poolRaw); } catch (_) { /* storage may be blocked */ }
+  const limitVal = parseInt((limitInput?.value || '').trim(), 10); // optional "newest N total" preview
+  const limit = Number.isFinite(limitVal) && limitVal > 0 ? limitVal : 0;
+  activeLimit = limit;
+  try { localStorage.setItem('nimiq-tax-limit', limit ? String(limit) : ''); } catch (_) { /* storage may be blocked */ }
 
   button.disabled = true;
   clearTable();
@@ -534,7 +551,7 @@ async function lookup() {
       fetchAddressHistory(client, addr, (added) => {
         fetchedTotal += added;
         status(`Fetched ${fetchedTotal} transaction(s)…`);
-      }),
+      }, limit),
     );
     for (const history of histories) {
       for (const tx of history) txMap.set(tx.transactionHash || tx.hash, tx);
@@ -549,6 +566,7 @@ async function lookup() {
 
     // Sort newest to oldest by block height (fall back to 0 if undefined)
     txs.sort((a, b) => (b.blockHeight || 0) - (a.blockHeight || 0));
+    if (limit && txs.length > limit) txs.splice(limit); // preview: keep only the newest N in total
 
     // Determine timestamps and collect unique dates
     status('Resolving block timestamps…');
@@ -735,7 +753,7 @@ async function lookup() {
     }
 
     txSection.hidden = false;
-    status(`${txs.length} transaction(s) loaded across ${addresses.length} address(es).`, 'success');
+    status(`${txs.length} transaction(s) loaded${activeLimit ? ` · preview limited to newest ${activeLimit}` : ''} across ${addresses.length} address(es).`, 'success');
 
     // Trigger FIFO calculation (non-blocking)
     fifoWorker.postMessage({ addresses, coinbase: coinbaseAddr, pool: poolAddrs });

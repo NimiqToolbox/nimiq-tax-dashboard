@@ -45,6 +45,24 @@
         NIM. Remembered in this browser.
       </p>
 
+      <label class="field-label field-label-spaced" for="limit-input">
+        Quick preview <span class="field-optional">optional</span>
+      </label>
+      <input
+        id="limit-input"
+        class="field-input"
+        type="number"
+        min="1"
+        step="1"
+        inputmode="numeric"
+        placeholder="Fetch only the most recent N transactions (total)"
+      />
+      <p class="field-help">
+        Speeds up a first look by fetching only the newest N transactions across all addresses.
+        <strong>Tax figures will be incomplete</strong> — older cost basis and some HTLC recovery
+        legs fall outside the window. Leave empty for full history.
+      </p>
+
       <div class="lookup-actions">
         <button id="lookup-btn" class="nq-button">Look up</button>
         <span id="status" class="status"></span>
