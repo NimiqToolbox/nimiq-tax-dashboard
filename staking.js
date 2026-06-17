@@ -37,6 +37,17 @@ export function isCoinbaseReward(tx, coinbaseNorm, ownSet) {
   return recipientOwned || stakerOwned;
 }
 
+// User-declared pool payout addresses. A staking pool that pays rewards as plain transfers (an
+// off-chain payout) leaves no protocol marker, so we can only treat it as income if the user tells
+// us which address the pool pays from. Any incoming transfer (to an owned address) whose sender is
+// one of those declared pool addresses is counted as a staking reward. poolSet/ownSet are Sets of
+// normAddr() values.
+export function isPoolReward(tx, poolSet, ownSet) {
+  if (!poolSet || poolSet.size === 0) return false;
+  if (!poolSet.has(normAddr(tx?.sender))) return false;
+  return ownSet.has(normAddr(tx?.recipient));
+}
+
 // Incoming staking-op codes (first byte of raw recipient data) -> canonical type string.
 const INCOMING_OP_BY_BYTE = {
   '00': 'create-validator', '01': 'update-validator', '02': 'deactivate-validator',

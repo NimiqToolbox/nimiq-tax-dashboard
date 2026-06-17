@@ -1,5 +1,5 @@
 import { getAllTransactions, getPrice, saveRealized, saveGainsSummary } from '../storage.js';
-import { classifyStaking, normAddr, isCoinbaseReward } from '../staking.js';
+import { classifyStaking, normAddr, isCoinbaseReward, isPoolReward } from '../staking.js';
 
 function formatDateStr(ts) {
   const d = new Date(ts * 1000);
@@ -10,7 +10,7 @@ function formatDateStr(ts) {
 }
 
 self.onmessage = async (e) => {
-  const { addresses, coinbase } = e.data;
+  const { addresses, coinbase, pool } = e.data;
   if (!addresses?.length) {
     self.postMessage({ error: 'No addresses' });
     return;
@@ -18,6 +18,7 @@ self.onmessage = async (e) => {
   const addressSet = new Set(addresses.map(a => a.toLowerCase()));
   const ownNorm = new Set(addresses.map(normAddr)); // staking classification (space/case-insensitive)
   const coinbaseNorm = coinbase ? normAddr(coinbase) : null; // Policy.COINBASE_ADDRESS, for block rewards
+  const poolNorm = new Set((pool || []).map(normAddr)); // user-declared pool payout addresses
   try {
     const txs = await getAllTransactions();
     // sort oldest -> newest by timestamp (we stored __timestamp)
@@ -71,7 +72,9 @@ self.onmessage = async (e) => {
       // so a later disposal is taxed only on the change since receipt. Two on-chain forms:
       //  • restaked reward — an add-stake the validator/pool sends crediting our stake (kind 'reward');
       //  • coinbase reward — a block reward whose sender is the protocol coinbase address.
-      if ((staking && staking.kind === 'reward') || isCoinbaseReward(tx, coinbaseNorm, ownNorm)) {
+      if ((staking && staking.kind === 'reward')
+          || isCoinbaseReward(tx, coinbaseNorm, ownNorm)
+          || isPoolReward(tx, poolNorm, ownNorm)) {
         lots.push({ remaining: nimValue, costPer: price });
         const y = dateStr.split('-')[2];
         stakingIncomeByYear[y] = (stakingIncomeByYear[y] || 0) + nimValue * price;

@@ -7,7 +7,7 @@ import init, { Client, ClientConfiguration, Policy } from './nimiq-core/index.js
 import { saveTransactions, getPrice, savePrices, getGainsSummary, getAllTransactions, getTransactionsForAddresses } from './storage.js';
 import { toCsv, downloadCsv } from './export.js';
 import Identicons from './design/assets/iqons.bundle.min.js';
-import { classifyStaking, isCoinbaseReward } from './staking.js';
+import { classifyStaking, isCoinbaseReward, isPoolReward } from './staking.js';
 
 // Start price worker
 const priceWorker = new Worker('./worker/priceWorker.js?v=' + Date.now(), { type: 'module' });
@@ -27,10 +27,17 @@ const table = document.getElementById('results');
 const tbody = table.querySelector('tbody');
 const button = document.getElementById('lookup-btn');
 const addressInput = document.getElementById('address-input');
+const poolInput = document.getElementById('pool-input');
 const summaryEl = document.getElementById('summary');
 const exportTxBtn = document.getElementById('export-tx');
 const exportGainsBtn = document.getElementById('export-gains');
 const txSection = document.getElementById('tx-section');
+
+// Remember the optional pool payout addresses in this browser across reloads.
+if (poolInput) {
+  const savedPools = localStorage.getItem('nimiq-tax-pool-addresses');
+  if (savedPools) poolInput.value = savedPools;
+}
 
 // ---- Address / identicon helpers (Nimiq design system) ----
 function normAddr(s) { return String(s || '').replace(/\s+/g, '').toUpperCase(); }
@@ -499,6 +506,10 @@ async function lookup() {
 
   const addressSet = new Set(addresses.map(a => a.toLowerCase()));
   const ownNorm = new Set(addresses.map(normAddr)); // canonical (space/case-insensitive) set for staking
+  const poolRaw = (poolInput?.value || '').trim();
+  const poolAddrs = poolRaw.split(/\n+/).map(a => a.trim()).filter(Boolean);
+  const poolNorm = new Set(poolAddrs.map(normAddr)); // declared pool payout addresses → reward income
+  try { localStorage.setItem('nimiq-tax-pool-addresses', poolRaw); } catch (_) { /* storage may be blocked */ }
 
   button.disabled = true;
   clearTable();
@@ -578,9 +589,10 @@ async function lookup() {
       const swap = classifySwap(tx);
       const staking = swap ? null : classifyStaking(tx, ownNorm);
       const coinbaseReward = (!swap && !staking) && isCoinbaseReward(tx, coinbaseNorm, ownNorm);
+      const poolReward = (!swap && !staking && !coinbaseReward) && isPoolReward(tx, poolNorm, ownNorm);
       tx.__swap = swap || undefined;
       tx.__staking = staking || undefined;
-      const isReward = staking?.kind === 'reward' || coinbaseReward; // reward credited to us (income, +)
+      const isReward = staking?.kind === 'reward' || coinbaseReward || poolReward; // reward credited to us (income, +)
       const counterparty = outgoing ? recipient : sender; // the "other" party (HTLC / contract / validator)
       const signClass = (incoming || isReward) ? 'amt-in' : outgoing ? 'amt-out' : '';
       const sign = (incoming || isReward) ? '+' : outgoing ? '-' : '';
@@ -630,6 +642,13 @@ async function lookup() {
         pill.textContent = 'Staking reward';
         pill.title = "Block reward from the protocol coinbase — counted as income at the day's NIM price";
         dir.appendChild(pill);
+      } else if (poolReward) {
+        row.classList.add('staking');
+        const pill = document.createElement('span');
+        pill.className = 'dir reward';
+        pill.textContent = 'Pool reward';
+        pill.title = "Incoming transfer from a pool payout address you configured — counted as staking income at the day's NIM price";
+        dir.appendChild(pill);
       } else if (internal) dir.innerHTML = '<span class="dir internal">Internal</span>';
       else if (isOut) dir.innerHTML = '<span class="dir out">Out</span>';
       else if (isIn) dir.innerHTML = '<span class="dir in">In</span>';
@@ -666,7 +685,7 @@ async function lookup() {
     status(`${txs.length} transaction(s) loaded across ${addresses.length} address(es).`, 'success');
 
     // Trigger FIFO calculation (non-blocking)
-    fifoWorker.postMessage({ addresses, coinbase: coinbaseAddr });
+    fifoWorker.postMessage({ addresses, coinbase: coinbaseAddr, pool: poolAddrs });
   } catch (err) {
     console.error(err);
     status('Error: ' + (err.message || err), 'error');

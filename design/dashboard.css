@@ -60,6 +60,12 @@ body {
   text-transform: uppercase; letter-spacing: 0.107em;
   color: var(--text-40); margin-bottom: 12px;
 }
+.field-label-spaced { margin-top: 22px; }
+.field-optional {
+  margin-left: 6px; font-weight: 600; letter-spacing: 0.06em;
+  color: var(--text-30);
+}
+.field-help { margin: 10px 0 0; font-size: 12px; line-height: 1.45; color: var(--text-40); }
 
 .address-input {
   display: block; width: 100%; resize: vertical; min-height: 104px;

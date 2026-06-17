@@ -104,18 +104,19 @@ Nimiq Albatross staking is detected directly from on-chain data — no external 
   the staking contract isn't a disposal, so it no longer shows up as a phantom sale, and the
   original cost basis carries through.
 - **Rewards are counted as income** at the day's NIM price (and establish a cost basis for later
-  disposals). Two on-chain forms are detected:
+  disposals). Three forms are detected:
   - **Validator / block rewards** — paid by the protocol to a validator's reward address. The
     history surfaces these as transactions whose sender is the coinbase address
     (`Policy.COINBASE_ADDRESS`, _"the address we use to denote that some coins originated from a
     coinbase event"_).
   - **Restaked rewards** — `add-stake` transactions a validator/pool sends to compound a reward
     back into your stake.
+  - **Declared pool payouts** — pools that pay rewards as plain transfers leave no protocol marker,
+    so add the pool's payout address(es) in the optional **Pool payout addresses** field; incoming
+    transfers from them are then counted as staking income (the list is remembered in your browser).
 
-**Limitation:** rewards a pool pays out _off-chain_ (a plain transfer from the pool's wallet to
-yours) look identical to any other incoming transfer, so they can't be auto-classified as rewards —
-they're still counted as received NIM, just not flagged as staking income. Reconcile those manually
-if they apply to you.
+**Limitation:** off-chain pool payouts from addresses you haven't declared go uncounted as income —
+they're still included as received NIM, just not flagged as staking rewards.
 
 ## Disclaimer
 
