@@ -1,0 +1,30 @@
+# Local reference checkouts — for comparison only, never committed/pushed
+/reference/
+
+# Nimiq Design System source bundle — the needed assets are vendored into ./design/
+/nimiq-design-system/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# Logs
+*.log
+npm-debug.log*
+
+# Dependencies / build output (none today; here defensively)
+node_modules/
+dist/
+build/
+.cache/

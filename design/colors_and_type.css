@@ -1,0 +1,210 @@
+/* ============================================================================
+   NIMIQ DESIGN SYSTEM — Colors & Type
+   Source of truth: Nimiq Style Framework v0.8.5 (github.com/nimiq/nimiq-style)
+   + Nimiq Wallet theme tokens (github.com/nimiq/wallet → src/scss)
+
+   HOW NIMIQ SIZES THINGS
+   ----------------------
+   The framework sets html { font-size: 8px } and expresses EVERYTHING in rem.
+   So 1rem = 8px, 2rem = 16px, 2.75rem = 22px, etc. When you build a screen at
+   Nimiq's native scale, set the root font-size to 8px and copy rem values
+   verbatim. For general HTML work, the --px-* equivalents below are provided.
+   ============================================================================ */
+
+@import url('fonts/fonts.css');
+
+:root {
+    /* ----- BASE FONT SCALE ----- */
+    --nimiq-root-size: 8px;          /* html font-size; 1rem === 8px */
+
+    /* ========================================================================
+       1. BRAND COLORS  (the full Nimiq palette)
+       Each hue ships as a flat color, a "darkened" hover variant, and a
+       radial gradient ("-bg") that always lights from the bottom-right.
+       ======================================================================== */
+
+    --nimiq-blue:        #1F2348;   /* PRIMARY. Text, sidebar, default button   */
+    --nimiq-light-blue:  #0582CA;   /* ACCENT. Links, focus, active, info       */
+    --nimiq-gold:        #E9B213;   /* NIM brand accent / highlights            */
+    --nimiq-green:       #21BCA5;   /* Success, staking, positive amounts       */
+    --nimiq-orange:      #FC8702;   /* Warning, attention                        */
+    --nimiq-red:         #D94432;   /* Error, destructive, outgoing             */
+    --nimiq-purple:      #5F4B8B;
+    --nimiq-pink:        #FA7268;
+    --nimiq-light-green: #88B04B;
+    --nimiq-brown:       #795548;
+
+    /* Neutrals */
+    --nimiq-white:       #FFFFFF;
+    --nimiq-gray:        #F4F4F4;   /* App background (groundfloor)             */
+    --nimiq-light-gray:  #FAFAFA;
+
+    /* Darkened variants — used on hover/active of colored buttons */
+    --nimiq-blue-darkened:        #151833;
+    --nimiq-light-blue-darkened:  #0071C3;
+    --nimiq-gold-darkened:        #E5A212;
+    --nimiq-green-darkened:       #20B29E;
+    --nimiq-orange-darkened:      #FC7500;
+    --nimiq-red-darkened:         #D13030;
+
+    /* On-dark adaptions — swap these in on a blue background for AA contrast */
+    --nimiq-light-blue-on-dark:   #0CA6FE;
+    --nimiq-red-on-dark:          #FF5C48;
+
+    /* Crypto/token brand colors used in the wallet */
+    --bitcoin-orange: #F7931A;
+    --usdc-blue:      #2775CA;
+    --usdt-green:     #009393;
+
+    /* ========================================================================
+       2. SIGNATURE RADIAL GRADIENTS
+       Nimiq's hallmark: a radial gradient anchored at the bottom-right corner.
+       Buttons, the logo, and brand surfaces all use it. Never a linear gradient.
+       ======================================================================== */
+    --nimiq-blue-bg:        radial-gradient(100% 100% at bottom right, #260133, var(--nimiq-blue));
+    --nimiq-light-blue-bg:  radial-gradient(100% 100% at bottom right, #265DD7, var(--nimiq-light-blue));
+    --nimiq-gold-bg:        radial-gradient(100% 100% at bottom right, #EC991C, var(--nimiq-gold));
+    --nimiq-green-bg:       radial-gradient(100% 100% at bottom right, #41A38E, var(--nimiq-green));
+    --nimiq-orange-bg:      radial-gradient(100% 100% at bottom right, #FD6216, var(--nimiq-orange));
+    --nimiq-red-bg:         radial-gradient(100% 100% at bottom right, #CC3047, var(--nimiq-red));
+    --nimiq-purple-bg:      radial-gradient(100% 100% at bottom right, #4D4C96, var(--nimiq-purple));
+    --nimiq-pink-bg:        radial-gradient(100% 100% at bottom right, #E0516B, var(--nimiq-pink));
+    --nimiq-light-green-bg: radial-gradient(100% 100% at bottom right, #70B069, var(--nimiq-light-green));
+    --nimiq-brown-bg:       radial-gradient(100% 100% at bottom right, #724147, var(--nimiq-brown));
+
+    --nimiq-blue-bg-darkened:       radial-gradient(100% 100% at bottom right, #180021, var(--nimiq-blue-darkened));
+    --nimiq-light-blue-bg-darkened: radial-gradient(100% 100% at bottom right, #2355C4, var(--nimiq-light-blue-darkened));
+    --nimiq-green-bg-darkened:      radial-gradient(100% 100% at bottom right, #3D9988, var(--nimiq-green-darkened));
+
+    /* ========================================================================
+       3. TEXT-ON-LIGHT OPACITY LADDER (Wallet theme)
+       Body text is never pure black — it is Nimiq Blue at reduced alpha.
+       This single ladder drives all greys you see in the product.
+       ======================================================================== */
+    --text-100: rgba(31, 35, 72, 1);
+    --text-80:  rgba(31, 35, 72, 0.8);
+    --text-70:  rgba(31, 35, 72, 0.7);   /* default body copy */
+    --text-60:  rgba(31, 35, 72, 0.6);
+    --text-50:  rgba(31, 35, 72, 0.5);   /* placeholders, muted */
+    --text-40:  rgba(31, 35, 72, 0.4);   /* labels */
+    --text-30:  rgba(31, 35, 72, 0.3);
+    --text-25:  rgba(31, 35, 72, 0.25);
+    --text-20:  rgba(31, 35, 72, 0.2);
+    --text-16:  rgba(31, 35, 72, 0.16);
+    --text-14:  rgba(31, 35, 72, 0.14);  /* input border hover */
+    --text-12:  rgba(31, 35, 72, 0.12);
+    --text-10:  rgba(31, 35, 72, 0.1);   /* input border default */
+    --text-6:   rgba(31, 35, 72, 0.06);  /* hairline fills, .nq-button-s bg */
+
+    /* Semantic surfaces (Wallet) */
+    --bg-base:      var(--nimiq-gray);   /* app canvas        */
+    --bg-primary:   var(--nimiq-white);  /* main / cards      */
+    --bg-secondary: var(--nimiq-blue);   /* sidebar / dark    */
+    --bg-card:      var(--nimiq-white);
+    --nimiq-highlight-bg: rgba(31, 35, 72, 0.06);
+
+    /* ========================================================================
+       4. TYPOGRAPHY
+       Primary: "Muli" (a.k.a. Mulish on Google Fonts). Weights 400/600/700.
+       Mono:    "Fira Mono" — ONLY for crypto addresses & account numbers.
+       Buttons & labels are UPPERCASE with positive letter-spacing.
+       ======================================================================== */
+    --font-family:      'Muli', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+    --font-family-mono: 'Fira Mono', 'SF Mono', ui-monospace, Menlo, monospace;
+
+    --fw-regular:  400; /* @kind font */
+    --fw-semibold: 600; /* @kind font */
+    --fw-bold:     700; /* @kind font */
+
+    /* Type scale — rem values are at Nimiq's 8px root; px are the rendered size */
+    --h1-size:        3rem;     /* 24px  bold, line-height 1.2 */
+    --h2-size:        2.5rem;   /* 20px  bold */
+    --h3-size:        2rem;     /* 16px  bold */
+    --body-size:      2rem;     /* 16px  regular, line-height 1.3125, --text-70 */
+    --small-size:     1.75rem;  /* 14px  semibold */
+    --label-size:     1.75rem;  /* 14px  UPPERCASE, +0.107em tracking, --text-40 */
+    --small-label-size: 1.5rem; /* 12px */
+    --tiny-label-size: 1.375rem;/* 11px */
+    --large-button-size: 2rem;  /* 16px */
+    --small-button-size: 1.75rem;
+    --link-size:      2rem;
+
+    --px-h1: 24px;
+    --px-h2: 20px;
+    --px-h3: 16px;
+    --px-body: 16px;
+    --px-small: 14px;
+    --px-label: 14px;
+
+    /* ========================================================================
+       5. RADII, SHADOWS, MOTION, SPACING
+       ======================================================================== */
+    --radius-card:   1.25rem;   /* 10px — cards */
+    --radius-input:  0.5rem;    /* 4px  — inputs, small surfaces */
+    --radius-pill:   500px;     /* fully-round buttons & pills */
+    --radius-button: 500px;
+
+    --shadow-card:      0 0.5rem 3.5rem rgba(0, 0, 0, 0.111);   /* resting card */
+    --shadow-button:    0 0.5rem 1.5rem rgba(0, 0, 0, 0.15);
+    --shadow-button-hover: 0 1rem 2.5rem rgba(0, 0, 0, 0.2);
+    --shadow-button-active: 0 0.2rem 0.3rem rgba(0, 0, 0, 0.2);
+    --shadow-overlay:   0 1.5rem 3.5rem rgba(0, 0, 0, 0.15);
+
+    /* THE Nimiq easing curve — used for nearly every transition */
+    --nimiq-ease: cubic-bezier(0.25, 0, 0, 1); /* @kind other */
+    --ease-bounce: cubic-bezier(0.41, 0.34, 0.26, 1.55); /* @kind other */ /* active/press spring */
+    --transition-fast: 0.2s var(--nimiq-ease);
+    --transition-base: 0.3s var(--nimiq-ease);
+    --transition-slow: 0.75s var(--nimiq-ease); /* column / panel slides */
+
+    /* Spacing rhythm (multiples of 1rem === 8px) */
+    --space-1: 0.5rem;  /*  4px */
+    --space-2: 1rem;    /*  8px */
+    --space-3: 1.5rem;  /* 12px */
+    --space-4: 2rem;    /* 16px */
+    --space-6: 3rem;    /* 24px */
+    --space-8: 4rem;    /* 32px */
+}
+
+/* ============================================================================
+   SEMANTIC ELEMENT STYLES
+   Mirrors the .nq-* classes from the Nimiq Style Framework so you can drop
+   these onto plain HTML. Apply on a light surface; flip greys on dark.
+   ============================================================================ */
+
+.nq-h1, h1.nq {
+    font-size: var(--h1-size); line-height: 1.2; font-weight: var(--fw-bold);
+    color: var(--nimiq-blue); margin: 3rem 0; text-wrap: pretty;
+}
+.nq-h2, h2.nq {
+    font-size: var(--h2-size); line-height: 1.2; font-weight: var(--fw-bold);
+    color: var(--nimiq-blue); margin: 2.5rem 0; text-wrap: pretty;
+}
+.nq-h3, h3.nq {
+    font-size: var(--h3-size); line-height: 1.2; font-weight: var(--fw-bold);
+    color: var(--nimiq-blue); margin: 2rem 0;
+}
+.nq-text {
+    font-size: var(--body-size); line-height: 1.3125;
+    color: var(--text-70); margin: 2rem 0; text-wrap: pretty;
+}
+.nq-text-s {
+    font-size: var(--small-size); line-height: 1.2; font-weight: var(--fw-semibold);
+}
+.nq-label {
+    font-size: var(--label-size); line-height: 0.857; font-weight: var(--fw-semibold);
+    text-transform: uppercase; letter-spacing: 0.107em; color: var(--text-40); margin: 1rem 0;
+}
+.nq-link {
+    color: var(--nimiq-light-blue); text-decoration: none; cursor: pointer;
+}
+.nq-link:hover, .nq-link:active { text-decoration: underline; }
+
+.nq-mono { font-family: var(--font-family-mono); letter-spacing: 0.02em; }
+
+/* Notices */
+.nq-notice { font-weight: var(--fw-semibold); font-size: 2rem; }
+.nq-notice.info    { color: var(--nimiq-light-blue); }
+.nq-notice.success { color: var(--nimiq-green); }
+.nq-notice.warning { color: var(--nimiq-orange); }
+.nq-notice.error   { color: var(--nimiq-red); }

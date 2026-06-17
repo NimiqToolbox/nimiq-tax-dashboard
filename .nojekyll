@@ -1,0 +1,2 @@
+# This file disables GitHub Pages' Jekyll processing so all assets
+# (WebAssembly, workers, files in any folder) are served verbatim.

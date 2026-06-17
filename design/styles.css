@@ -1,0 +1,12 @@
+/* ============================================================================
+   NIMIQ DESIGN SYSTEM — root stylesheet
+   Link THIS file and you get the whole system: tokens, fonts, and the .nq-*
+   component primitives. Order matters — tokens (and the @font-face rules they
+   pull in) load before the components that consume them.
+
+   For reference only (NOT imported here): assets/nimiq-style.min.css is the
+   original minified Nimiq Style Framework dump, kept for lookup.
+   ============================================================================ */
+
+@import url('colors_and_type.css'); /* design tokens + @font-face (via fonts/fonts.css) + .nq-* element styles */
+@import url('nq-components.css');    /* buttons, inputs, cards, pills, chips */
