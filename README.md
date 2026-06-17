@@ -94,13 +94,33 @@ All read-only and public:
 | [Fastspot](https://fastspot.io/) public API | Atomic-swap counter-asset detection (uses Nimiq's public publishable key) |
 | [nimiq.watch](https://nimiq.watch/) | Block-explorer deep links |
 
+## Staking
+
+Nimiq Albatross staking is detected directly from on-chain data — no external indexer:
+
+- **Staking transactions are labelled** (Add stake, Start staking, Unstake, validator ops) by
+  matching the staking contract (`NQ77 0000 … 0001`) and the transaction's data type.
+- **Stake and unstake are treated as tax-neutral transfers** — moving your own NIM into or out of
+  the staking contract isn't a disposal, so it no longer shows up as a phantom sale, and the
+  original cost basis carries through.
+- **Restaked rewards are counted as income** at the day's NIM price (and establish a cost basis for
+  later disposals). They're detected as `add-stake` transactions sent by the validator/pool that
+  credit your stake.
+
+**Limitations** (inherent to an on-chain, light-client tool, no indexer): rewards paid *directly*
+to your wallet look like ordinary incoming transfers and aren't auto-classified as rewards; and raw
+validator block-reward *inherents* aren't exposed by the light client at all. Reconcile those
+manually if they apply to you.
+
 ## Disclaimer
 
 **Not tax advice.** This tool is for informational purposes only and is not tax, accounting,
-legal, or financial advice. Figures are best-effort and may be incomplete. FIFO gains assume each
-disposal's cost basis comes from your prior looked-up acquisitions — NIM acquired before your
-earliest transaction here, from staking, or off-chain is treated as **zero cost basis**, which
-overstates gains. Always confirm with a qualified tax professional before filing.
+legal, or financial advice. Figures are best-effort and may be incomplete. Staking and unstaking
+are treated as tax-neutral transfers and restaked rewards as income at the day's price (see
+[Staking](#staking) for what can and can't be detected on-chain). FIFO gains assume each disposal's
+cost basis comes from your prior looked-up acquisitions — NIM acquired before your earliest
+looked-up transaction or off-chain is treated as **zero cost basis**, which overstates gains.
+Always confirm with a qualified tax professional before filing.
 
 ## Contributing
 

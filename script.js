@@ -7,6 +7,7 @@ import init, { Client, ClientConfiguration } from './nimiq-core/index.js';
 import { saveTransactions, getPrice, savePrices, getGainsSummary, getAllTransactions, getTransactionsForAddresses } from './storage.js';
 import { toCsv, downloadCsv } from './export.js';
 import Identicons from './design/assets/iqons.bundle.min.js';
+import { classifyStaking } from './staking.js';
 
 // Start price worker
 const priceWorker = new Worker('./worker/priceWorker.js?v=' + Date.now(), { type: 'module' });
@@ -174,6 +175,16 @@ function lookupSwapAsset(htlcAddress) {
   return swapAssetCache.get(htlcAddress);
 }
 
+// Human tooltip explaining the tax treatment of a staking row.
+function stakingTitle(s) {
+  switch (s.kind) {
+    case 'reward':   return "Restaked staking reward — counted as income at the day's NIM price";
+    case 'stake-in': return 'Stake added to the Nimiq staking contract — not a taxable disposal (you still own it)';
+    case 'unstake':  return 'Stake returned from the Nimiq staking contract — return of your own NIM, not income';
+    default:         return 'Nimiq staking operation (no change of ownership)';
+  }
+}
+
 // Fetch an address's full NIM history the way the Nimiq Wallet does: one big paginated
 // getTransactionsByAddress sweep, seeded with the transactions we already have
 // (knownTransactionDetails) so the client skips re-deriving them and repeat look-ups only
@@ -259,7 +270,7 @@ exportTxBtn.addEventListener('click', async () => {
 exportGainsBtn.addEventListener('click', async () => {
   status('Building gains CSV…');
   const rows = await getGainsSummary();
-  const headers = ['year','proceeds','cost','gain'];
+  const headers = ['year','proceeds','cost','gain','stakingIncome'];
   const csv = toCsv(rows, headers);
   downloadCsv('nimiq_yearly_gains.csv', csv);
   status('Gains CSV downloaded');
@@ -284,15 +295,17 @@ function renderSummary(summaryArr) {
   let html = '<section class="panel">';
   html += '<h2 class="panel-title">Yearly gains (FIFO)</h2>';
   html += '<table class="gains-table"><thead><tr>';
-  html += '<th>Year</th><th>Proceeds (USD)</th><th>Cost basis (USD)</th><th>Gain (USD)</th>';
+  html += '<th>Year</th><th>Proceeds (USD)</th><th>Cost basis (USD)</th><th>Capital gain (USD)</th><th>Staking income (USD)</th>';
   html += '</tr></thead><tbody>';
   summaryArr.forEach(s => {
     const gainClass = s.gain >= 0 ? 'gain-pos' : 'gain-neg';
+    const income = s.stakingIncome || 0;
     html += `<tr><td>${s.year}</td><td>${s.proceeds.toFixed(2)}</td>`
-         +  `<td>${s.cost.toFixed(2)}</td><td class="${gainClass}">${s.gain.toFixed(2)}</td></tr>`;
+         +  `<td>${s.cost.toFixed(2)}</td><td class="${gainClass}">${s.gain.toFixed(2)}</td>`
+         +  `<td>${income ? income.toFixed(2) : '—'}</td></tr>`;
   });
   html += '</tbody></table>';
-  html += '<p class="card-note">FIFO method · disposals without a prior tracked acquisition use a zero cost basis · not tax advice.</p>';
+  html += '<p class="card-note">FIFO method · capital gains from disposals; staking rewards counted as income at the day\'s price; stake/unstake transfers are tax-neutral · disposals without a prior tracked acquisition use a zero cost basis · not tax advice.</p>';
   html += '</section>';
   summaryEl.innerHTML = html;
   exportGainsBtn.disabled = false;
@@ -485,6 +498,7 @@ async function lookup() {
   }
 
   const addressSet = new Set(addresses.map(a => a.toLowerCase()));
+  const ownNorm = new Set(addresses.map(normAddr)); // canonical (space/case-insensitive) set for staking
 
   button.disabled = true;
   clearTable();
@@ -557,9 +571,15 @@ async function lookup() {
       const incoming = isIn && !isOut;
       const outgoing = isOut && !isIn;
       if (internal) row.classList.add('internal');
-      const counterparty = outgoing ? recipient : sender; // the "other" party (HTLC for swaps)
-      const signClass = incoming ? 'amt-in' : outgoing ? 'amt-out' : '';
-      const sign = incoming ? '+' : outgoing ? '-' : '';
+      // Swap (HTLC) takes precedence; otherwise check staking-contract interactions.
+      const swap = classifySwap(tx);
+      const staking = swap ? null : classifyStaking(tx, ownNorm);
+      tx.__swap = swap || undefined;
+      tx.__staking = staking || undefined;
+      const isReward = staking?.kind === 'reward'; // a restaked reward credited to us (income, +)
+      const counterparty = outgoing ? recipient : sender; // the "other" party (HTLC / contract / validator)
+      const signClass = (incoming || isReward) ? 'amt-in' : outgoing ? 'amt-out' : '';
+      const sign = (incoming || isReward) ? '+' : outgoing ? '-' : '';
 
       // Date
       const dateCell = row.insertCell();
@@ -572,8 +592,6 @@ async function lookup() {
       // Direction pill — atomic-swap HTLC legs get a distinct "Swap" pill, with the
       // counter-asset (BTC/USDC/USDT/…) resolved asynchronously via Fastspot.
       const dir = row.insertCell();
-      const swap = classifySwap(tx);
-      tx.__swap = swap || undefined;
       if (swap) {
         row.classList.add('swap');
         const base = swap.kind === 'funding' ? 'Swap out' : swap.kind === 'redeem' ? 'Swap in' : 'Swap refund';
@@ -593,6 +611,14 @@ async function lookup() {
             pill.title = 'Atomic-swap HTLC (counter-asset unavailable from Fastspot)';
           }
         });
+      } else if (staking) {
+        row.classList.add('staking');
+        const pill = document.createElement('span');
+        pill.className = staking.kind === 'reward' ? 'dir reward'
+          : staking.kind === 'unstake' ? 'dir unstake' : 'dir stake';
+        pill.textContent = staking.label;
+        pill.title = stakingTitle(staking);
+        dir.appendChild(pill);
       } else if (internal) dir.innerHTML = '<span class="dir internal">Internal</span>';
       else if (isOut) dir.innerHTML = '<span class="dir out">Out</span>';
       else if (isIn) dir.innerHTML = '<span class="dir in">In</span>';

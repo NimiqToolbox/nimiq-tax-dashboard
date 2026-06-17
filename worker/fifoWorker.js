@@ -1,4 +1,5 @@
 import { getAllTransactions, getPrice, saveRealized, saveGainsSummary } from '../storage.js';
+import { classifyStaking, normAddr } from '../staking.js';
 
 function formatDateStr(ts) {
   const d = new Date(ts * 1000);
@@ -15,6 +16,7 @@ self.onmessage = async (e) => {
     return;
   }
   const addressSet = new Set(addresses.map(a => a.toLowerCase()));
+  const ownNorm = new Set(addresses.map(normAddr)); // staking classification (space/case-insensitive)
   try {
     const txs = await getAllTransactions();
     // sort oldest -> newest by timestamp (we stored __timestamp)
@@ -34,6 +36,7 @@ self.onmessage = async (e) => {
 
     const lots = [];// queue of { remaining_luna, cost_usd_per_nim }
     const realizedRows = [];
+    const stakingIncomeByYear = {}; // year -> USD of restaked staking-reward income
 
     for (const tx of txs) {
       const senderIn = addressSet.has((tx.sender || '').toLowerCase());
@@ -45,6 +48,14 @@ self.onmessage = async (e) => {
       if (isRefund(tx)) continue;
       if (isFunding(tx) && refundedHtlcs.has((tx.recipient || '').toLowerCase())) continue;
 
+      // Staking. Tax treatment differs from a plain transfer, so classify before the
+      // acquisition/disposal logic. stake-in / unstake / admin are tax-neutral: the user keeps
+      // ownership (NIM just moves into/out of the staking contract), so the FIFO lot pool is left
+      // untouched — skipping them also prevents an "add stake" from being mistaken for a sale.
+      // A restaked reward (kind === 'reward') is handled below (income + new cost-basis lot).
+      const staking = classifyStaking(tx, ownNorm);
+      if (staking && staking.kind !== 'reward') continue;
+
       const nimValue = tx.value / 1e5; // NIM
       const dateStr = formatDateStr(tx.__timestamp || 0); // the tx's own date (for realized rows)
       // Price for the tx date, falling back to the nearest on-or-before day (up to 5 days)
@@ -54,6 +65,15 @@ self.onmessage = async (e) => {
         price = await getPrice(formatDateStr((tx.__timestamp || 0) - back * 86400));
       }
       if (price === undefined) continue; // still no price within 5 days -> skip
+
+      // Restaked staking reward: ordinary income at the day's fair value, and it establishes a
+      // cost-basis lot so a later disposal is taxed only on the change in value since receipt.
+      if (staking && staking.kind === 'reward') {
+        lots.push({ remaining: nimValue, costPer: price });
+        const y = dateStr.split('-')[2];
+        stakingIncomeByYear[y] = (stakingIncomeByYear[y] || 0) + nimValue * price;
+        continue;
+      }
 
       if (recipientIn) {
         // Incoming purchase
@@ -86,12 +106,16 @@ self.onmessage = async (e) => {
 
     // Aggregate yearly
     const summary = {};
+    const ensureYear = (y) => (summary[y] ||= { year: y, proceeds: 0, cost: 0, gain: 0, stakingIncome: 0 });
     for (const row of realizedRows) {
-      const y = row.year;
-      if (!summary[y]) summary[y] = { year: y, proceeds: 0, cost: 0, gain: 0 };
-      summary[y].proceeds += row.proceeds;
-      summary[y].cost += row.costBasis;
-      summary[y].gain += row.gain;
+      const s = ensureYear(row.year);
+      s.proceeds += row.proceeds;
+      s.cost += row.costBasis;
+      s.gain += row.gain;
+    }
+    // Staking-reward income is ordinary income, tracked separately from capital gains.
+    for (const [y, usd] of Object.entries(stakingIncomeByYear)) {
+      ensureYear(y).stakingIncome += usd;
     }
     const summaryArr = Object.values(summary);
 
