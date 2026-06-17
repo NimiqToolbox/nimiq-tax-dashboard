@@ -3,8 +3,8 @@
 > Paste your Nimiq addresses and get a tax-ready, FIFO realized-gains report — computed entirely in your browser.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Runs 100% locally](https://img.shields.io/badge/runs-100%25%20locally-21BCA5.svg)
-![No backend](https://img.shields.io/badge/backend-none-1F2348.svg)
+![No backend](https://img.shields.io/badge/backend-none-21BCA5.svg)
+![No tracking](https://img.shields.io/badge/tracking-none-1F2348.svg)
 
 **Live app:** <https://nimiqtoolbox.github.io/nimiq-tax-dashboard/>
 
@@ -27,13 +27,18 @@ It's a single static page — no build step, no server, no account.
 
 ## Privacy & security
 
-**Everything runs locally in your browser. Your addresses never touch a server we control.**
+**No backend, no accounts, no tracking — your data stays in your browser.**
 
-- There is **no backend** — the page is 100% static.
-- Your addresses and transactions are processed **on your device** and cached only in your
-  browser's IndexedDB (`nimiq-tax-db`). Clear your browser data to wipe them.
-- No accounts, no analytics, no tracking.
-- The only network calls are to public, read-only services (see [Data sources](#data-sources)).
+- This project runs **no server of its own** — the page is 100% static.
+- Your transaction history and FIFO gains are **computed and cached entirely on your device**
+  (in your browser's IndexedDB, `nimiq-tax-db`). Clear your browser data to wipe them.
+- No analytics, no cookies, no accounts.
+- To do its job, the app makes read-only calls to **public** services (see [Data sources](#data-sources)):
+  - it queries the **public Nimiq network** directly for your history — exactly as any Nimiq wallet
+    does (those decentralized nodes necessarily see the addresses you look up, like any on-chain query);
+  - it fetches historical NIM/USD prices from **DefiLlama**, which only ever receives
+    **date ranges — never your addresses**;
+  - for atomic swaps, it asks the public **Fastspot** API about a swap-contract address.
 - It's open-source — read every line before you trust it.
 
 ## Run it locally
