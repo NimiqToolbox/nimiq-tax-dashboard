@@ -199,6 +199,8 @@ body {
 .dir.stake    { color: var(--nimiq-light-blue); background: rgba(5, 130, 202, 0.12); }
 .dir.unstake  { color: var(--nimiq-light-blue); background: rgba(5, 130, 202, 0.12); }
 .dir.reward   { color: var(--nimiq-green);       background: rgba(33, 188, 165, 0.18); }
+/* Nimiq Pay app HTLC (recovery contract) — distinct from atomic swaps */
+.dir.pay      { color: var(--nimiq-purple);      background: rgba(95, 75, 139, 0.14); }
 
 /* signed amounts, date + explorer link */
 .amt-in  { color: var(--nimiq-green); }

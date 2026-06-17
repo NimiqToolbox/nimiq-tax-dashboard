@@ -7,7 +7,7 @@ import init, { Client, ClientConfiguration, Policy } from './nimiq-core/index.js
 import { saveTransactions, getPrice, savePrices, getGainsSummary, getAllTransactions, getTransactionsForAddresses } from './storage.js';
 import { toCsv, downloadCsv } from './export.js';
 import Identicons from './design/assets/iqons.bundle.min.js';
-import { classifyStaking, isCoinbaseReward, isPoolReward } from './staking.js';
+import { classifyStaking, isCoinbaseReward, isPoolReward, classifySwap } from './staking.js';
 
 // Start price worker
 const priceWorker = new Worker('./worker/priceWorker.js?v=' + Date.now(), { type: 'module' });
@@ -134,21 +134,7 @@ function counterpartyCell(addr) {
   return wrap;
 }
 
-// Classify a NIM atomic-swap HTLC leg from on-chain plain-transaction details.
-// (The counter-asset — BTC/USDC/USDT — is NOT derivable from the NIM chain alone;
-//  the Nimiq Wallet only knows it from its own local Fastspot swap records.)
-//   funding : NIM sent INTO a new HTLC      -> recipientType 'htlc'  (a "swap out")
-//   redeem  : NIM taken OUT with the secret -> senderType 'htlc' + proof 'regular-transfer'  (a "swap in")
-//   refund  : HTLC timed out / cancelled    -> senderType 'htlc' + proof 'timeout-resolve'|'early-resolve'
-function classifySwap(tx) {
-  if (tx.recipientType === 'htlc' || tx.data?.type === 'htlc') return { kind: 'funding' };
-  if (tx.senderType === 'htlc') {
-    const p = tx.proof?.type;
-    if (p === 'timeout-resolve' || p === 'early-resolve') return { kind: 'refund' };
-    return { kind: 'redeem' };
-  }
-  return null;
-}
+// HTLC swap / Nimiq Pay classification (classifySwap) lives in staking.js — imported above.
 
 // Resolve a swap's counter-asset (BTC / USDC / USDT / EUR) from a NIM HTLC address via the
 // public Fastspot API — the same lookup the Nimiq Wallet uses (GET /contracts/NIM/{address}
@@ -573,6 +559,15 @@ async function lookup() {
     saveTransactions(txs).catch(console.error);
     exportTxBtn.disabled = false;
 
+    // Map each HTLC address to its hashRoot from funding txs, so a refund/recovery leg (whose proof
+    // omits the hash) can still be told apart: all-zeroes hashRoot => Nimiq Pay app HTLC, not a swap.
+    const htlcHashRoots = new Map();
+    for (const tx of txs) {
+      if (tx.data?.type === 'htlc' && tx.data.hashRoot != null && tx.recipient) {
+        htlcHashRoots.set(normAddr(tx.recipient), tx.data.hashRoot);
+      }
+    }
+
     // Populate table (peer-centric: one counterparty per row)
     for (const tx of txs) {
       const row = tbody.insertRow();
@@ -586,7 +581,7 @@ async function lookup() {
       const outgoing = isOut && !isIn;
       if (internal) row.classList.add('internal');
       // Swap (HTLC) takes precedence; otherwise check staking-contract interactions.
-      const swap = classifySwap(tx);
+      const swap = classifySwap(tx, htlcHashRoots);
       const staking = swap ? null : classifyStaking(tx, ownNorm);
       const coinbaseReward = (!swap && !staking) && isCoinbaseReward(tx, coinbaseNorm, ownNorm);
       const poolReward = (!swap && !staking && !coinbaseReward) && isPoolReward(tx, poolNorm, ownNorm);
@@ -608,7 +603,16 @@ async function lookup() {
       // Direction pill — atomic-swap HTLC legs get a distinct "Swap" pill, with the
       // counter-asset (BTC/USDC/USDT/…) resolved asynchronously via Fastspot.
       const dir = row.insertCell();
-      if (swap) {
+      if (swap && swap.payApp) {
+        // Nimiq Pay app HTLC — a hash-locked recovery contract, NOT an atomic swap; skip Fastspot.
+        row.classList.add('swap');
+        const label = swap.kind === 'funding' ? 'Pay sent' : swap.kind === 'redeem' ? 'Pay received' : 'Pay recovery';
+        const pill = document.createElement('span');
+        pill.className = 'dir pay';
+        pill.textContent = label;
+        pill.title = 'Nimiq Pay app HTLC (recovery contract) — not an atomic swap';
+        dir.appendChild(pill);
+      } else if (swap) {
         row.classList.add('swap');
         const base = swap.kind === 'funding' ? 'Swap out' : swap.kind === 'redeem' ? 'Swap in' : 'Swap refund';
         const arrow = swap.kind === 'funding' ? '→' : swap.kind === 'redeem' ? '←' : '↺';

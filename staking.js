@@ -48,6 +48,44 @@ export function isPoolReward(tx, poolSet, ownSet) {
   return ownSet.has(normAddr(tx?.recipient));
 }
 
+// ---- HTLC classification: atomic swaps vs Nimiq Pay app ------------------------------------------
+// HTLCs (recipientType/senderType 'htlc') are used both for atomic swaps and by the Nimiq Pay app:
+//   • Pay-app HTLC — a recovery contract with an all-zeroes hashRoot (no hash-lock); the Pay service
+//     co-signs an early-resolve whose proof carries a known Nimiq Pay cosigner publicKey.
+//   • swap HTLC    — a real hashRoot; its counter-asset isn't on the NIM chain (resolved via Fastspot).
+// The refund/early-resolve proof omits the hashRoot, so for that leg the caller passes htlcHashRoots
+// (HTLC address -> hashRoot, built from funding txs) to recover it.
+const NIMIQ_PAY_COSIGNERS = new Set([
+  // Nimiq Pay HTLC cosigner public key(s), mainnet — from the Nimiq Wallet config (config.mainnet.ts).
+  '91b21f4b100273bd7034f6369c29d1f7ba72dba7de6720ad3cd8b81916218913',
+]);
+
+function isZeroHash(hashRoot) {
+  return typeof hashRoot === 'string' && hashRoot.length > 0 && /^0+$/.test(hashRoot.replace(/^0x/i, ''));
+}
+
+export function isPayAppHtlc(tx, hashRoot) {
+  if (isZeroHash(hashRoot)) return true;
+  const pk = tx?.proof?.publicKey; // present on co-signed (early-resolve) proofs
+  return typeof pk === 'string' && NIMIQ_PAY_COSIGNERS.has(pk.toLowerCase());
+}
+
+// kind: 'funding' (NIM into a new HTLC, out) | 'redeem' (taken out with the secret, in) |
+//       'refund' (timed out / recovered, in). payApp === true marks a Nimiq Pay HTLC, not a swap.
+export function classifySwap(tx, htlcHashRoots) {
+  const funding = tx?.recipientType === 'htlc' || tx?.data?.type === 'htlc';
+  const resolve = tx?.senderType === 'htlc';
+  if (!funding && !resolve) return null;
+  // hashRoot: funding carries it in data, redeem in the proof; refund nowhere -> map via funding.
+  let hashRoot = funding ? tx?.data?.hashRoot : tx?.proof?.hashRoot;
+  if (hashRoot == null && resolve && htlcHashRoots) hashRoot = htlcHashRoots.get(normAddr(tx.sender));
+  const payApp = isPayAppHtlc(tx, hashRoot);
+  if (funding) return { kind: 'funding', payApp };
+  const p = tx?.proof?.type;
+  const kind = (p === 'timeout-resolve' || p === 'early-resolve') ? 'refund' : 'redeem';
+  return { kind, payApp };
+}
+
 // Incoming staking-op codes (first byte of raw recipient data) -> canonical type string.
 const INCOMING_OP_BY_BYTE = {
   '00': 'create-validator', '01': 'update-validator', '02': 'deactivate-validator',

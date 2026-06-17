@@ -20,7 +20,7 @@ It's a single static page — no build step, no server, no account.
 - 🔎 **Multi-address lookup** — paste one or many Nimiq addresses; histories are fetched in parallel.
 - ⛓️ **Trustless data** — history comes directly from the Nimiq Albatross network via the in-browser light client, not a third-party indexer.
 - 💵 **Historical pricing** — each transaction is valued at its date's NIM/USD price (CoinGecko via DefiLlama).
-- 🔁 **Swap detection** — NIM↔BTC/USDC/USDT/EUR atomic swaps are recognised via the public Fastspot API.
+- 🔁 **Swap & Pay detection** — NIM↔BTC/USDC/USDT/EUR atomic swaps are recognised via the public Fastspot API, and Nimiq Pay app HTLCs are labelled separately rather than mistaken for swaps.
 - 📊 **FIFO gains** — realized capital gains per calendar year using a first-in-first-out cost basis.
 - 📁 **CSV export** — download both the transaction ledger and the yearly gains summary.
 - ⚡ **Off-thread** — pricing and FIFO run in Web Workers, so the UI stays responsive.
