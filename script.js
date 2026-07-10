@@ -241,7 +241,7 @@ async function fetchAddressHistory(client, addr, onProgress, maxCount) {
   // which is what triggers "maximum number of transactions exceeds the one supported".
   let known = [];
   try {
-    known = await getTransactionsForAddresses(new Set([addr.toLowerCase()]));
+    known = await getTransactionsForAddresses(new Set([normAddr(addr)]));
     known.sort((a, b) => (b.blockHeight || 0) - (a.blockHeight || 0));
   } catch (_) { /* no cache yet */ }
 
@@ -559,14 +559,17 @@ function clearTable() {
 
 async function lookup() {
   const raw = addressInput.value.trim();
-  const addresses = raw.split(/\n+/).map(a => a.trim()).filter(Boolean);
+  // Canonicalize every entered address (strip the Nimiq-style spaces / any whitespace, upper-case)
+  // so matching is format-agnostic — the chain returns addresses spaced ("NQ84 DT0K …"), and users
+  // may paste them spaced, plain, or with a non-breaking space from the wallet. normAddr unifies all.
+  const addresses = raw.split(/\n+/).map(a => normAddr(a)).filter(Boolean);
 
   if (!addresses.length) {
     status('Please enter at least one address.');
     return;
   }
 
-  const addressSet = new Set(addresses.map(a => a.toLowerCase()));
+  const addressSet = new Set(addresses); // already canonical; compare with normAddr(chainAddress)
   const ownNorm = new Set(addresses.map(normAddr)); // canonical (space/case-insensitive) set for staking
   const poolRaw = (poolInput?.value || '').trim();
   const poolAddrs = poolRaw.split(/\n+/).map(a => a.trim()).filter(Boolean);
@@ -601,26 +604,37 @@ async function lookup() {
     if (poolSize > 1) status(`Querying ${addresses.length} addresses across ${poolSize} parallel fetchers…`);
     const histories = new Array(addresses.length);
     let nextAddr = 0;
+    let remaining = addresses.length;
+    let resolveDone;
+    const allFetched = new Promise((r) => { resolveDone = r; });
     async function drain(c) { // one lane: pull addresses off the shared queue until it's empty
       while (true) {
         const idx = nextAddr++; // atomic — no await between the read and the increment
-        if (idx >= addresses.length) break;
-        histories[idx] = await fetchAddressHistory(c, addresses[idx], (added) => {
-          fetchedTotal += added;
-          status(`Fetched ${fetchedTotal} transaction(s)…`);
-        }, limit);
+        if (idx >= addresses.length) return;
+        try {
+          histories[idx] = await fetchAddressHistory(c, addresses[idx], (added) => {
+            fetchedTotal += added;
+            status(`Fetched ${fetchedTotal} transaction(s)…`);
+          }, limit);
+        } catch (e) {
+          console.warn('address fetch failed', addresses[idx], e);
+          histories[idx] = [];
+        }
+        if (--remaining === 0) resolveDone(); // finish as soon as every address is done
       }
     }
-    async function runClient(i) {
-      let c;
-      try { c = await getPooledClient(i); }
-      catch (_) { c = client; } // this extra client failed to sync -> fall back to the warm primary
-      const lanes = Math.min(PER_CLIENT, addresses.length);
-      await Promise.all(Array.from({ length: lanes }, () => drain(c)));
+    // The warm primary starts immediately with all its lanes. Extra clients pico-sync in the
+    // BACKGROUND and join the queue only once ready — crucially we await `allFetched` (every address
+    // done), NOT the extra clients' syncs, so a slow or still-syncing extra never delays the result.
+    for (let l = 0; l < Math.min(PER_CLIENT, addresses.length); l++) drain(client);
+    for (let i = 1; i < poolSize; i++) {
+      getPooledClient(i)
+        .then((c) => { for (let l = 0; l < PER_CLIENT; l++) drain(c); })
+        .catch(() => {}); // extra client failed to sync — the primary already covers the work
     }
-    await Promise.all(Array.from({ length: poolSize }, (_, i) => runClient(i)));
+    await allFetched;
     for (const history of histories) {
-      for (const tx of history) txMap.set(tx.transactionHash || tx.hash, tx);
+      for (const tx of history || []) txMap.set(tx.transactionHash || tx.hash, tx);
     }
 
     const txs = Array.from(txMap.values());
@@ -710,8 +724,8 @@ async function lookup() {
       const hash = tx.transactionHash || tx.hash || '';
       const sender = tx.sender || '';
       const recipient = tx.recipient || '';
-      const isOut = !!sender && addressSet.has(sender.toLowerCase());
-      const isIn = !!recipient && addressSet.has(recipient.toLowerCase());
+      const isOut = !!sender && addressSet.has(normAddr(sender));
+      const isIn = !!recipient && addressSet.has(normAddr(recipient));
       const internal = isOut && isIn;
       const incoming = isIn && !isOut;
       const outgoing = isOut && !isIn;

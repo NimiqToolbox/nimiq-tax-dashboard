@@ -1,3 +1,5 @@
+import { normAddr } from './staking.js';
+
 // Basic IndexedDB wrapper for client-side persistence.
 // Stores:
 //  – transactions: key = txHash, value = full transaction object plus derived fields
@@ -68,8 +70,10 @@ export async function getAllTransactions() {
 }
 
 export async function getTransactionsForAddresses(addressSet) {
+  // addressSet holds canonical (normAddr) addresses; stored tx addresses are chain-format (spaced),
+  // so normalize them the same way before matching.
   const all = await getAllTransactions();
-  return all.filter(tx => addressSet.has((tx.sender || '').toLowerCase()) || addressSet.has((tx.recipient || '').toLowerCase()));
+  return all.filter(tx => addressSet.has(normAddr(tx.sender)) || addressSet.has(normAddr(tx.recipient)));
 }
 
 // Price helpers -------------------------------------------------------------

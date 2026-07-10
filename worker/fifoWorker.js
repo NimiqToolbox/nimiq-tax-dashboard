@@ -15,7 +15,7 @@ self.onmessage = async (e) => {
     self.postMessage({ error: 'No addresses' });
     return;
   }
-  const addressSet = new Set(addresses.map(a => a.toLowerCase()));
+  const addressSet = new Set(addresses.map(normAddr)); // canonical; compare with normAddr(chainAddress)
   const ownNorm = new Set(addresses.map(normAddr)); // staking classification (space/case-insensitive)
   const coinbaseNorm = coinbase ? normAddr(coinbase) : null; // Policy.COINBASE_ADDRESS, for block rewards
   const poolNorm = new Set((pool || []).map(normAddr)); // user-declared pool payout addresses
@@ -47,8 +47,8 @@ self.onmessage = async (e) => {
     const stakingIncomeByYear = {}; // year -> USD of restaked staking-reward income
 
     for (const tx of txs) {
-      const senderIn = addressSet.has((tx.sender || '').toLowerCase());
-      const recipientIn = addressSet.has((tx.recipient || '').toLowerCase());
+      const senderIn = addressSet.has(normAddr(tx.sender));
+      const recipientIn = addressSet.has(normAddr(tx.recipient));
       const internal = senderIn && recipientIn;
       if (internal) continue; // ignore
 
