@@ -239,6 +239,23 @@ const HISTORY_MIN_PEERS = 3;       // query several history peers at once so one
 
 const rHash = (r) => r.transactionHash || r.hash;
 
+// The FIRST history query on a fresh page can stall ~30s while ONE client waits on an unresponsive
+// history peer; warm queries are ~2s. So until the pool is proven warm, we HEDGE that first query
+// across every pool client at once (each is an independent worker with its own peers) and take the
+// first peer to answer — a single client's stall is masked by the others. Every result is still
+// verified by getTransactionsByAddress, so this stays fully trustless. Once one answers, the pool is
+// warm and later queries use a single client.
+let poolWarm = false;
+async function fetchFirstPageHedged(client, addr, knownHint) {
+  const query = (c) => c.getTransactionsByAddress(addr, undefined, knownHint, undefined, HISTORY_PAGE, HISTORY_MIN_PEERS);
+  if (poolWarm) return query(client);
+  const queries = [];
+  for (let i = 0; i < POOL_MAX; i++) queries.push(getPooledClient(i).then(query));
+  const page = await Promise.any(queries); // first client to return wins; rejects only if ALL fail
+  poolWarm = true;
+  return page;
+}
+
 // Fetch an address's full NIM history. Two things made this slow:
 //   1. The first verified query sometimes stalled ~30s waiting on one unresponsive history peer — we
 //      now pass HISTORY_MIN_PEERS so several peers are queried at once and one slow peer can't gate it.
@@ -262,7 +279,7 @@ async function fetchAddressHistory(client, addr, onProgress, maxCount) {
   // Newest page first (verified). Small wallets finish right here in a single query.
   let firstPage;
   try {
-    firstPage = await client.getTransactionsByAddress(addr, undefined, knownHint, undefined, HISTORY_PAGE, HISTORY_MIN_PEERS);
+    firstPage = await fetchFirstPageHedged(client, addr, knownHint);
   } catch (e) {
     console.warn('getTransactionsByAddress failed', e);
     return Array.from(result.values());
@@ -498,7 +515,7 @@ async function priceForTs(tsSec) {
 // then kept warm for reuse. The cap is deliberately modest: each client opens its own peer
 // connections and holds its own WASM state, and they all bootstrap through the same handful of
 // seed nodes, so too many would waste memory and risk rate-limiting the seeds.
-const POOL_MAX = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 4) - 2));
+const POOL_MAX = Math.min(3, Math.max(2, (navigator.hardwareConcurrency || 4) - 1)); // >=2 so we can hedge
 const clientPool = []; // index -> Promise<Client> (empty/undefined slot = not yet created or failed)
 
 // Lazily and idempotently create pool client #i + start its pico sync. Reused once warm.
@@ -516,6 +533,15 @@ function getPooledClient(i) {
 
 // The primary client (index 0). Warmed eagerly on page load; serves all non-fetch queries.
 function getClient() { return getPooledClient(0); }
+
+// The first client in the pool to reach consensus — masks a slow pico-sync on any single client the
+// same way the hedged first query masks a slow history peer. Used by lookup() so a slow primary
+// doesn't hold everything up.
+function firstReadyClient() {
+  const ps = [];
+  for (let i = 0; i < POOL_MAX; i++) ps.push(getPooledClient(i));
+  return ps.length === 1 ? ps[0] : Promise.any(ps).catch(() => ps[0]);
+}
 
 // Canonical Nimiq mainnet seed nodes (same list the official Nimiq Wallet uses).
 const NIMIQ_SEED_NODES = [
@@ -561,7 +587,6 @@ async function initClient(index = 0) {
   config.network('mainalbatross');
   config.seedNodes(NIMIQ_SEED_NODES);
   config.syncMode('pico');
-  config.desiredPeerCount(32); // connect to more peers so a history-serving peer is available sooner
   // onlySecureWsConnections stays at its default (true) for HTTPS hosting.
 
   const client = await Client.create(config.build());
@@ -633,7 +658,7 @@ async function lookup() {
   button.disabled = true;
   clearTable();
   try {
-    const client = await getClient();
+    const client = await firstReadyClient();
     // The protocol coinbase address marks block-reward coins; read once (WASM is initialised now).
     const coinbaseAddr = (() => { try { return Policy.COINBASE_ADDRESS; } catch (_) { return null; } })();
     const coinbaseNorm = coinbaseAddr ? normAddr(coinbaseAddr) : null;
@@ -938,5 +963,7 @@ addressInput.addEventListener('keyup', (e) => {
   if (e.key === 'Enter') lookup();
 });
 
-// Start pico sync immediately on page load, so consensus is ready by the time you look up.
-getClient(); 
+// Start pico sync immediately on page load, so consensus is ready by the time you look up. We warm
+// the whole small pool (not just the primary) so the first look-up can hedge its first query across
+// several independent clients and mask the ~30s single-client cold-start stall.
+for (let i = 0; i < POOL_MAX; i++) getPooledClient(i);
