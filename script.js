@@ -4,8 +4,8 @@
 // because the WASM file needs to be fetched.
 
 import init, { Client, ClientConfiguration, Policy } from './nimiq-core/index.js';
-import { saveTransactions, getPrice, savePrices, getGainsSummary, getAllTransactions, getTransactionsForAddresses } from './storage.js';
-import { toCsv, downloadCsv } from './export.js';
+import { saveTransactions, getPrice, savePrices, getTransactionsForAddresses } from './storage.js';
+import { downloadCsv, buildTransactionsCsv, toRealizedCsv } from './export.js';
 import Identicons from './design/assets/iqons.bundle.min.js';
 import { classifyStaking, isCoinbaseReward, isPoolReward, classifySwap, htlcAddressOf } from './staking.js';
 
@@ -30,9 +30,12 @@ const addressInput = document.getElementById('address-input');
 const poolInput = document.getElementById('pool-input');
 const limitInput = document.getElementById('limit-input');
 let activeLimit = 0; // newest-N preview cap currently in effect (0 = full history)
+let lastExportRows = []; // normalized, classified rows from the last lookup (source for the CSV export)
+let lastRealizedRows = []; // per-disposal realised gains from the last FIFO run (source for the gains export)
 const summaryEl = document.getElementById('summary');
 const exportTxBtn = document.getElementById('export-tx');
 const exportGainsBtn = document.getElementById('export-gains');
+const exportFormatSel = document.getElementById('export-format');
 const txSection = document.getElementById('tx-section');
 
 // Remember the optional pool payout addresses + preview limit in this browser across reloads.
@@ -197,6 +200,20 @@ function stakingTitle(s) {
   }
 }
 
+// Canonical transaction type for the CSV export — the same classification the table's direction
+// pill shows, collapsed to a single machine-readable string the exporter maps to Koinly labels.
+function canonTxType({ swap, staking, coinbaseReward, poolReward, internal, isOut }) {
+  if (swap) {
+    if (swap.payApp) return swap.kind === 'funding' ? 'pay-sent' : swap.kind === 'redeem' ? 'pay-received' : 'pay-recovery';
+    return swap.kind === 'funding' ? 'swap-out' : swap.kind === 'redeem' ? 'swap-in' : 'swap-refund';
+  }
+  if (staking) return staking.kind === 'reward' ? 'staking-reward' : staking.kind === 'unstake' ? 'unstake' : 'stake';
+  if (coinbaseReward) return 'staking-reward';
+  if (poolReward) return 'pool-reward';
+  if (internal) return 'internal';
+  return isOut ? 'send' : 'receive';
+}
+
 // Fetch an address's full NIM history the way the Nimiq Wallet does: one big paginated
 // getTransactionsByAddress sweep, seeded with the transactions we already have
 // (knownTransactionDetails) so the client skips re-deriving them and repeat look-ups only
@@ -274,33 +291,41 @@ async function fetchAddressHistory(client, addr, onProgress, maxCount) {
   return Array.from(result.values());
 }
 
-exportTxBtn.addEventListener('click', async () => {
+exportTxBtn.addEventListener('click', () => {
+  if (!lastExportRows.length) { status('Run a lookup first, then export.'); return; }
+  const format = exportFormatSel?.value || 'koinly';
   status('Building transactions CSV…');
-  const rows = await getAllTransactions();
-  const headers = ['hash','sender','recipient','value','blockHeight','timestamp'];
-  const csv = toCsv(rows, headers);
-  downloadCsv('nimiq_transactions.csv', csv);
-  status('Transactions CSV downloaded');
+  // Format-specific transaction CSV (Koinly / CoinTracking / CryptoTaxCalculator / CoinLedger /
+  // generic). Tax-neutral own-movements are dropped by every tool format (kept in the generic one).
+  const { name, filename, csv } = buildTransactionsCsv(format, lastExportRows);
+  const dataRows = csv ? csv.split('\n').length - 1 : 0; // excludes the header line
+  downloadCsv(filename, csv);
+  status(`Transactions CSV downloaded — ${dataRows} row(s), ${name} format.`, 'success');
 });
 
-exportGainsBtn.addEventListener('click', async () => {
+exportGainsBtn.addEventListener('click', () => {
+  // Per-disposal realised capital gains (FIFO), one row per taxable disposal. Read from the last
+  // FIFO run held in memory (not IndexedDB) so the export always matches the on-screen summary and
+  // reflects exactly the current lookup's addresses — no stale rows from earlier lookups.
+  if (!lastRealizedRows.length) {
+    status('No realised disposals yet — nothing sold/spent (staking-only), or the gains calc is still running.');
+    return;
+  }
   status('Building gains CSV…');
-  const rows = await getGainsSummary();
-  const headers = ['year','proceeds','cost','gain','stakingIncome'];
-  const csv = toCsv(rows, headers);
-  downloadCsv('nimiq_yearly_gains.csv', csv);
-  status('Gains CSV downloaded');
+  downloadCsv('nimiq_realised_gains.csv', toRealizedCsv(lastRealizedRows));
+  status(`Gains CSV downloaded — ${lastRealizedRows.length} realised disposal(s).`, 'success');
 });
 
 // FIFO worker
 const fifoWorker = new Worker('./worker/fifoWorker.js?v=' + Date.now(), { type: 'module' });
 fifoWorker.onmessage = (e) => {
-  const { summary, error, htlc } = e.data;
+  const { summary, error, htlc, realized } = e.data;
   if (error) {
     console.warn('FIFO worker error', error);
     status('FIFO calc failed', 'error');
     return;
   }
+  lastRealizedRows = realized || []; // stash for the gains export (matches this summary exactly)
   if (summary) {
     renderSummary(summary, htlc);
   }
@@ -414,21 +439,34 @@ async function priceForTs(tsSec) {
   return undefined;
 }
 
-let clientPromise = null; // Promise<Client>
+// --- Nimiq client pool -----------------------------------------------------------------------
+// Fetching an address's history is single-threaded work: each client runs in its own worker and
+// verifies every page's proof on that one thread, so one client ≈ one CPU core. To parallelize we
+// keep a small POOL of independent clients — each its own worker/thread, each pico-syncing on its
+// own — and fan the addresses out across them (see lookup()). Client #0 is the "primary": warmed
+// eagerly on page load and also used for every non-fetch query (block timestamps, account probes,
+// Policy). Extra clients are created lazily — only when a lookup has enough addresses to use them —
+// then kept warm for reuse. The cap is deliberately modest: each client opens its own peer
+// connections and holds its own WASM state, and they all bootstrap through the same handful of
+// seed nodes, so too many would waste memory and risk rate-limiting the seeds.
+const POOL_MAX = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 4) - 2));
+const clientPool = []; // index -> Promise<Client> (empty/undefined slot = not yet created or failed)
 
-// Lazily and idempotently create the Nimiq client + start pico sync. Called eagerly on page
-// load (so consensus is establishing before you enter an address) and again by lookup().
-function getClient() {
-  if (!clientPromise) {
-    clientPromise = initClient();
-    clientPromise.catch((err) => {
-      console.error(err);
-      status('Error: ' + (err.message || err), 'error');
-      clientPromise = null; // reset so a later lookup retries the sync from scratch
+// Lazily and idempotently create pool client #i + start its pico sync. Reused once warm.
+function getPooledClient(i) {
+  if (!clientPool[i]) {
+    clientPool[i] = initClient(i);
+    clientPool[i].catch((err) => {
+      console.error(`[pool ${i}]`, err);
+      if (i === 0) status('Error: ' + (err.message || err), 'error'); // primary owns the status line
+      clientPool[i] = null; // reset so a later lookup retries this client's sync from scratch
     });
   }
-  return clientPromise;
+  return clientPool[i];
 }
+
+// The primary client (index 0). Warmed eagerly on page load; serves all non-fetch queries.
+function getClient() { return getPooledClient(0); }
 
 // Canonical Nimiq mainnet seed nodes (same list the official Nimiq Wallet uses).
 const NIMIQ_SEED_NODES = [
@@ -459,8 +497,11 @@ function withTimeout(promise, ms, message) {
   });
 }
 
-async function initClient() {
-  status('Loading Nimiq Web Client…');
+async function initClient(index = 0) {
+  // Only the primary client (index 0) narrates to the status line; extra pool clients sync quietly
+  // in the background so they don't stomp the live fetch progress the user is watching.
+  const note = index === 0 ? status : () => {};
+  note('Loading Nimiq Web Client…');
   await init();
 
   // Match the official Nimiq Wallet: PICO sync on mainnet. Pico is the fast path;
@@ -476,20 +517,20 @@ async function initClient() {
   const client = await Client.create(config.build());
 
   for (let attempt = 1; attempt <= MAX_CONSENSUS_RETRIES; attempt++) {
-    status(attempt === 1
+    note(attempt === 1
       ? 'Establishing consensus (pico sync)…'
       : `Pico sync retry ${attempt}/${MAX_CONSENSUS_RETRIES}…`);
     try {
       await withTimeout(client.waitForConsensusEstablished(), CONSENSUS_TIMEOUT_MS, 'Pico sync timed out');
-      status('Connected — ready to query the blockchain.', 'success');
+      note('Connected — ready to query the blockchain.', 'success');
       return client;
     } catch (e) {
-      console.warn(`[pico] consensus attempt ${attempt} failed:`, e);
+      console.warn(`[pico ${index}] consensus attempt ${attempt} failed:`, e);
       if (attempt === MAX_CONSENSUS_RETRIES) {
         throw new Error(`Pico sync failed after ${MAX_CONSENSUS_RETRIES} attempts (no fallback to other sync modes).`);
       }
       // Reconnect on the SAME pico client and retry — no sync-mode change.
-      try { await client.connectNetwork(); } catch (re) { console.warn('[pico] reconnect failed:', re); }
+      try { await client.connectNetwork(); } catch (re) { console.warn(`[pico ${index}] reconnect failed:`, re); }
       await sleep(500 * attempt); // increasing backoff, like the wallet's retry()
     }
   }
@@ -512,6 +553,8 @@ function formatLunaToNIM(luna) {
 function clearTable() {
   tbody.innerHTML = '';
   txSection.hidden = true;
+  lastExportRows = [];   // drop the previous lookup's export rows so a new lookup starts clean
+  lastRealizedRows = []; // ditto for realised gains — repopulated when the FIFO worker reports back
 }
 
 async function lookup() {
@@ -545,14 +588,37 @@ async function lookup() {
 
     const txMap = new Map(); // hash -> tx
     let fetchedTotal = 0;
-    // Fetch every address concurrently (each address still paginates sequentially — the page
-    // cursor is serial — but different addresses run in parallel, bounded to a few at a time).
-    const histories = await mapLimit(addresses, 6, (addr) =>
-      fetchAddressHistory(client, addr, (added) => {
-        fetchedTotal += added;
-        status(`Fetched ${fetchedTotal} transaction(s)…`);
-      }, limit),
-    );
+    // Fan the addresses out across the client pool with a shared work queue and two levels of
+    // parallelism: (1) up to POOL_MAX independent clients, each its own worker on its own CPU core,
+    // so proof verification runs on several cores at once; (2) a few addresses in flight per client
+    // (PER_CLIENT lanes), so their network round-trips overlap on that one worker — the concurrency
+    // the single-client code used to get. Client #0 is warm and starts immediately; extra clients
+    // pico-sync in parallel and join the queue as they reach consensus. A single address uses only
+    // the warm primary — no extra syncs are paid. (Within one address pagination stays serial: the
+    // page cursor is a hash chain, so one address can't be split — parallelism is across addresses.)
+    const PER_CLIENT = 4; // addresses in flight per client (overlaps network latency on one worker)
+    const poolSize = Math.min(POOL_MAX, addresses.length);
+    if (poolSize > 1) status(`Querying ${addresses.length} addresses across ${poolSize} parallel fetchers…`);
+    const histories = new Array(addresses.length);
+    let nextAddr = 0;
+    async function drain(c) { // one lane: pull addresses off the shared queue until it's empty
+      while (true) {
+        const idx = nextAddr++; // atomic — no await between the read and the increment
+        if (idx >= addresses.length) break;
+        histories[idx] = await fetchAddressHistory(c, addresses[idx], (added) => {
+          fetchedTotal += added;
+          status(`Fetched ${fetchedTotal} transaction(s)…`);
+        }, limit);
+      }
+    }
+    async function runClient(i) {
+      let c;
+      try { c = await getPooledClient(i); }
+      catch (_) { c = client; } // this extra client failed to sync -> fall back to the warm primary
+      const lanes = Math.min(PER_CLIENT, addresses.length);
+      await Promise.all(Array.from({ length: lanes }, () => drain(c)));
+    }
+    await Promise.all(Array.from({ length: poolSize }, (_, i) => runClient(i)));
     for (const history of histories) {
       for (const tx of history) txMap.set(tx.transactionHash || tx.hash, tx);
     }
@@ -587,7 +653,11 @@ async function lookup() {
     const minSec = times.length ? Math.min(...times) : undefined;
     const maxSec = times.length ? Math.max(...times) : undefined;
     await fetchPricesDataset(minSec, maxSec);
-    // Also fetch + persist prices in the worker (for the off-thread FIFO gains calc)
+    // Persist the prices we just fetched to IndexedDB up front, so the off-thread FIFO worker (which
+    // reads prices from IndexedDB) reliably finds them instead of racing the async price worker — the
+    // race is what left the gains calc empty (every tx got skipped for a missing price).
+    try { await savePrices(Object.fromEntries(priceCache)); } catch (e) { console.warn('price persist failed', e); }
+    // Also fetch + persist prices in the worker (a backstop covering a slightly wider padded range).
     priceWorker.postMessage({ fromSec: minSec, toSec: maxSec });
 
     // Ensure any missing dates are fetched individually (fallback)
@@ -630,9 +700,9 @@ async function lookup() {
       }
     }
 
-    // Save fetched txs to DB (fire & forget)
-    saveTransactions(txs).catch(console.error);
-    exportTxBtn.disabled = false;
+    // Save fetched txs to DB. Keep the promise so we can be sure the write has committed before the
+    // FIFO worker (which reads them back from IndexedDB) runs — otherwise it can race an empty store.
+    const savePromise = saveTransactions(txs).catch(console.error);
 
     // Populate table (peer-centric: one counterparty per row)
     for (const tx of txs) {
@@ -740,6 +810,38 @@ async function lookup() {
         usdCell.textContent = '—';
       }
 
+      // Tax category for the export — mirrors the FIFO worker's neutrality model so the two agree:
+      //   income   — staking/pool/coinbase reward (taxable income)
+      //   out / in — disposal to / acquisition from a third party (incl. settled swaps)
+      //   neutral  — own-movement (internal transfer, stake/unstake, HTLC recovery): excluded from
+      //              the tax-tool formats (would otherwise invent a phantom disposal).
+      let taxCat;
+      if (isReward) taxCat = 'income';
+      else if (internal || staking) taxCat = 'neutral'; // self-transfer, or stake/unstake
+      else if (swap) {
+        if (swap.kind === 'funding') taxCat = htlcStatus.get(normAddr(recipient)) === 'settled' ? 'out' : 'neutral';
+        else if (swap.kind === 'redeem') taxCat = htlcFunded.has(normAddr(sender)) ? 'neutral' : 'in';
+        else taxCat = 'neutral'; // refund — recovery of our own funds
+      } else if (outgoing) taxCat = 'out';
+      else if (incoming) taxCat = 'in';
+      else taxCat = 'neutral';
+
+      // Capture a normalized, classified row for the CSV export — direction, canonical type, tax
+      // category, price and USD value all recorded here so the export mirrors this table exactly.
+      lastExportRows.push({
+        ts: tx.__timestamp,
+        hash,
+        counterparty,
+        nim: (tx.value || 0) / 1e5,
+        feeNim: (tx.fee != null ? tx.fee : 0) / 1e5,
+        price: price || undefined,
+        usd: price ? (tx.value / 1e5) * price : undefined,
+        dir: internal ? 'internal' : outgoing ? 'out' : 'in',
+        type: canonTxType({ swap, staking, coinbaseReward, poolReward, internal, isOut }),
+        taxCat,
+        swapRef: swap || null, // counterAsset fills in asynchronously after render; read at export time
+      });
+
       // Tx — block-explorer link (nimiq.watch)
       const txCell = row.insertCell();
       const a = document.createElement('a');
@@ -753,9 +855,11 @@ async function lookup() {
     }
 
     txSection.hidden = false;
+    exportTxBtn.disabled = false; // enable only now that lastExportRows is fully built
     status(`${txs.length} transaction(s) loaded${activeLimit ? ` · preview limited to newest ${activeLimit}` : ''} across ${addresses.length} address(es).`, 'success');
 
-    // Trigger FIFO calculation (non-blocking)
+    // Trigger FIFO calculation once the tx write has committed (so the worker reads a full store).
+    await savePromise;
     fifoWorker.postMessage({ addresses, coinbase: coinbaseAddr, pool: poolAddrs });
   } catch (err) {
     console.error(err);

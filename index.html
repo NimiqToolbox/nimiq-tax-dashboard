@@ -74,9 +74,23 @@
 
     <!-- Exports -->
     <div class="exports">
+      <label class="export-format-label" for="export-format">Format
+        <select id="export-format" class="export-format">
+          <option value="koinly">Koinly</option>
+          <option value="cointracking">CoinTracking</option>
+          <option value="cryptotaxcalculator">CryptoTaxCalculator</option>
+          <option value="coinledger">CoinLedger</option>
+          <option value="generic">Generic (full ledger)</option>
+        </select>
+      </label>
       <button id="export-tx" class="btn-secondary" disabled>Export transactions</button>
       <button id="export-gains" class="btn-secondary" disabled>Export gains</button>
     </div>
+    <p class="exports-note">
+      Tax-tool exports list acquisitions, disposals and staking income. Tax-neutral own-movements
+      (internal transfers, stake/unstake, HTLC recovery) are omitted — pick <em>Generic (full
+      ledger)</em> for every transaction. “Export gains” lists your FIFO realised disposals.
+    </p>
 
     <!-- Transactions -->
     <section id="tx-section" class="panel tx-card" hidden>

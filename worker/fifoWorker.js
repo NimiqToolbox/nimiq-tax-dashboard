@@ -1,4 +1,4 @@
-import { getAllTransactions, getPrice, saveRealized, saveGainsSummary } from '../storage.js';
+import { getAllTransactions, getPrice } from '../storage.js';
 import { classifyStaking, normAddr, isCoinbaseReward, isPoolReward, htlcAddressOf } from '../staking.js';
 
 function formatDateStr(ts) {
@@ -140,14 +140,13 @@ self.onmessage = async (e) => {
     }
     const summaryArr = Object.values(summary);
 
-    // Save
-    await saveRealized(realizedRows);
-    await saveGainsSummary(summaryArr);
-
+    // Results go straight back to the main thread (held in memory for the summary + gains export).
+    // We intentionally don't persist them: reading a stale, ever-growing IndexedDB store is what let
+    // an old lookup's disposals leak into a later export.
     if (htlcSettled || htlcPending) {
       console.debug(`[htlc] recovered=${htlcRecovered} pending=${htlcPending} settled(disposals)=${htlcSettled}`);
     }
-    self.postMessage({ ok: true, summary: summaryArr, htlc: { recovered: htlcRecovered, pending: htlcPending, settled: htlcSettled } });
+    self.postMessage({ ok: true, summary: summaryArr, realized: realizedRows, htlc: { recovered: htlcRecovered, pending: htlcPending, settled: htlcSettled } });
   } catch (err) {
     self.postMessage({ error: err.message || err.toString() });
   }
