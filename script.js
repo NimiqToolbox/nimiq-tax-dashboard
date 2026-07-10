@@ -234,59 +234,108 @@ async function mapLimit(items, limit, fn) {
   return results;
 }
 
-const HISTORY_PAGE = 100; // the Nimiq core's supported max per query (the wallet caps here too)
+const HISTORY_PAGE = 100;          // the Nimiq core's supported max per verified query
+const HISTORY_MIN_PEERS = 3;       // query several history peers at once so one slow/bad peer can't stall us
+
+const rHash = (r) => r.transactionHash || r.hash;
+
+// Fetch an address's full NIM history. Two things made this slow:
+//   1. The first verified query sometimes stalled ~30s waiting on one unresponsive history peer — we
+//      now pass HISTORY_MIN_PEERS so several peers are queried at once and one slow peer can't gate it.
+//   2. Verified pages were pulled ONE AT A TIME (~2.5s each), so a big wallet took tens of seconds.
+//      A single Nimiq client serialises its own queries, so for large wallets we learn every remaining
+//      transaction's boundary from cheap unverified receipts and fetch the rest as PARALLEL windows
+//      spread across the client POOL (independent clients = independent workers that really run at
+//      once). Small/medium wallets finish on the first page and never pay the receipts/pool overhead.
 async function fetchAddressHistory(client, addr, onProgress, maxCount) {
-  // What we already have, newest-first. We pass a bounded slice (<= page size) as
-  // knownTransactions so the client skips re-deriving them — but never more than the cap,
-  // which is what triggers "maximum number of transactions exceeds the one supported".
+  addr = normAddr(addr);
+  // Seed with cached txs so repeat look-ups only pull genuinely new transactions.
   let known = [];
   try {
-    known = await getTransactionsForAddresses(new Set([normAddr(addr)]));
+    known = await getTransactionsForAddresses(new Set([addr]));
     known.sort((a, b) => (b.blockHeight || 0) - (a.blockHeight || 0));
   } catch (_) { /* no cache yet */ }
-
   const result = new Map();
-  for (const t of known) result.set(t.transactionHash || t.hash, t);
-  const knownHint = known.slice(0, HISTORY_PAGE); // <= cap
+  for (const t of known) result.set(rHash(t), t);
+  const knownHint = known.slice(0, HISTORY_PAGE);
 
-  let startAt;
-  let prevOldest = null;
-  let fetched = 0;
+  // Newest page first (verified). Small wallets finish right here in a single query.
+  let firstPage;
+  try {
+    firstPage = await client.getTransactionsByAddress(addr, undefined, knownHint, undefined, HISTORY_PAGE, HISTORY_MIN_PEERS);
+  } catch (e) {
+    console.warn('getTransactionsByAddress failed', e);
+    return Array.from(result.values());
+  }
+  let addedFirst = 0, oldestHash = null;
+  for (const tx of firstPage) { const h = rHash(tx); if (!result.has(h)) addedFirst++; result.set(h, tx); oldestHash = h; }
+  if (onProgress && addedFirst) onProgress(addedFirst);
+  if (firstPage.length < HISTORY_PAGE            // reached the end of history
+      || addedFirst === 0                        // caught up to already-known txs
+      || (maxCount && firstPage.length >= maxCount)) {
+    return Array.from(result.values());
+  }
+
+  // Big wallet: cheap unverified receipts give every remaining tx's hash+height, so we can fetch the
+  // tail as gap-free windows (start_at = the receipt just above the window, since_block_height = its
+  // oldest block; the details are still verified by getTransactionsByAddress).
+  let receipts;
+  try {
+    receipts = await client.getTransactionReceiptsByAddress(addr, maxCount || undefined, undefined, HISTORY_MIN_PEERS);
+  } catch (e) {
+    console.warn('receipts unavailable; serial sweep for the tail', e);
+    return fetchAddressHistoryTail(client, addr, onProgress, maxCount, result, oldestHash, firstPage.length);
+  }
+  if (maxCount && receipts.length > maxCount) receipts = receipts.slice(0, maxCount);
+  let start = receipts.findIndex((r) => rHash(r) === oldestHash); // continue right after the first page
+  start = start < 0 ? firstPage.length : start + 1;
+  const windows = [];
+  for (let i = start; i < receipts.length; i += HISTORY_PAGE) {
+    const win = receipts.slice(i, i + HISTORY_PAGE);
+    if (win.every((r) => result.has(rHash(r)))) continue;
+    windows.push({ startAt: rHash(receipts[i - 1]), sinceHeight: win[win.length - 1].blockHeight, size: win.length });
+  }
+  if (!windows.length) return Array.from(result.values());
+
+  const fetchWindow = async (c, w) => {
+    try {
+      const page = await c.getTransactionsByAddress(addr, w.sinceHeight, undefined, w.startAt, w.size, HISTORY_MIN_PEERS);
+      let added = 0;
+      for (const tx of page) { const h = rHash(tx); if (!result.has(h)) added++; result.set(h, tx); }
+      if (onProgress && added) onProgress(added);
+    } catch (e) { console.warn('window fetch failed', e); }
+  };
+  // Spread the windows across the pool: a shared cursor hands the next window to whichever client is
+  // free. Extra clients pico-sync in the background and start pulling only once ready, so a still-
+  // syncing client never blocks the others (the warm primary carries the work until they join).
+  const nClients = Math.max(1, Math.min(POOL_MAX, windows.length));
+  let next = 0;
+  const drainWindows = async (c) => { while (next < windows.length) await fetchWindow(c, windows[next++]); };
+  await Promise.all(Array.from({ length: nClients }, (_, i) =>
+    (i === 0 ? Promise.resolve(client) : getPooledClient(i).catch(() => client)).then(drainWindows),
+  ));
+  return Array.from(result.values());
+}
+
+// Serial page-by-page sweep of the tail after the first page — the fallback when receipts can't be
+// fetched (keeps the old, always-correct behaviour).
+async function fetchAddressHistoryTail(client, addr, onProgress, maxCount, result, startAtHash, fetchedSoFar) {
+  let startAt = startAtHash, prevOldest = startAtHash, fetched = fetchedSoFar;
   while (true) {
     let page;
     try {
-      page = await client.getTransactionsByAddress(
-        addr,
-        /* sinceBlockHeight   */ undefined,
-        /* knownTransactions  */ knownHint,
-        /* startAt            */ startAt,
-        /* limit (per page)   */ HISTORY_PAGE,
-        /* minPeers (default) */ undefined,
-      );
-    } catch (e) {
-      console.warn('getTransactionsByAddress failed', e);
-      break;
-    }
+      page = await client.getTransactionsByAddress(addr, undefined, undefined, startAt, HISTORY_PAGE, HISTORY_MIN_PEERS);
+    } catch (e) { console.warn('getTransactionsByAddress failed', e); break; }
     if (!page.length) break;
-
-    let added = 0;
-    let oldest = null;
-    for (const tx of page) {
-      const h = tx.transactionHash || tx.hash;
-      if (!result.has(h)) added++;
-      result.set(h, tx);
-      oldest = h;
-    }
+    let added = 0, oldest = null;
+    for (const tx of page) { const h = rHash(tx); if (!result.has(h)) added++; result.set(h, tx); oldest = h; }
     if (onProgress && added) onProgress(added);
-
     fetched += page.length;
-    if (maxCount && fetched >= maxCount) break; // preview: stop once we have the newest maxCount
-
-    if (oldest === prevOldest) break;   // node didn't advance — avoid looping
-    prevOldest = oldest;
-    startAt = oldest;
-    if (added === 0) break;             // reached already-known txs
-    if (page.length < HISTORY_PAGE) break; // partial page -> end of history
+    if (maxCount && fetched >= maxCount) break;
+    if (oldest === prevOldest) break;
+    prevOldest = oldest; startAt = oldest;
+    if (added === 0) break;
+    if (page.length < HISTORY_PAGE) break;
   }
   return Array.from(result.values());
 }
@@ -512,6 +561,7 @@ async function initClient(index = 0) {
   config.network('mainalbatross');
   config.seedNodes(NIMIQ_SEED_NODES);
   config.syncMode('pico');
+  config.desiredPeerCount(32); // connect to more peers so a history-serving peer is available sooner
   // onlySecureWsConnections stays at its default (true) for HTTPS hosting.
 
   const client = await Client.create(config.build());
