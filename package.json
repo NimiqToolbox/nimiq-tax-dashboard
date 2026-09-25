@@ -1,0 +1,11 @@
+{
+  "name": "nimiq-tax-dashboard",
+  "private": true,
+  "description": "Static site, no build step. This file only pins the vendored Nimiq web client — see scripts/update-nimiq-core.mjs.",
+  "scripts": {
+    "update-nimiq-core": "node scripts/update-nimiq-core.mjs"
+  },
+  "dependencies": {
+    "@nimiq/core": "2.7.0"
+  }
+}

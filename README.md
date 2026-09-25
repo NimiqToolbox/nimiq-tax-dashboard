@@ -76,9 +76,18 @@ worker/
 nimiq-core/           Nimiq light client (WebAssembly) + Comlink glue
 launcher/browser/     Comlink worker proxies for the client
 lib/                  Nimiq web utilities (bundled)
+package.json          Pins the vendored client version (@nimiq/core) — not a build step
+scripts/              update-nimiq-core.mjs (vendors the client), smoke-test.cjs (headless check)
 design/               Nimiq Design System: tokens, fonts, components, brand assets
 vendor/               Tailwind (utility CSS)
 ```
+
+The Nimiq client in `nimiq-core/`, `launcher/browser/` and `lib/` is the browser build of the
+[`@nimiq/core`](https://www.npmjs.com/package/@nimiq/core) npm package, copied in verbatim. A GitHub
+Action ([`update-nimiq-core.yml`](.github/workflows/update-nimiq-core.yml)) checks npm every hour; when
+a new release is out it vendors it, smoke-tests the site with it in headless Chromium (consensus + a
+lookup), commits to `main` and redeploys GitHub Pages. To update by hand:
+`docker run --rm -v "$PWD":/app -w /app node:22-alpine node scripts/update-nimiq-core.mjs`.
 
 The Nimiq light client establishes consensus directly with the network from your browser.
 Price lookups and FIFO calculations run in dedicated Web Workers, and all persistence is local

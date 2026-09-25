@@ -1,0 +1,56 @@
+# Keeps the vendored Nimiq web client (@nimiq/core) current. Checks npm every hour; on a new release it
+# vendors it, smoke-tests the site with it in headless Chromium, commits to main and redeploys Pages.
+# A release that fails the smoke test is not committed — the run goes red instead.
+name: Update Nimiq web client
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write # push the update to main
+  pages: write    # request the Pages build: pushes made with GITHUB_TOKEN don't trigger one
+
+concurrency:
+  group: update-nimiq-core
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Vendor the latest @nimiq/core
+        id: vendor
+        run: |
+          node scripts/update-nimiq-core.mjs
+          echo "version=$(node -p "require('./package.json').dependencies['@nimiq/core']")" >> "$GITHUB_OUTPUT"
+          if [ -n "$(git status --porcelain)" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Smoke test in headless Chromium
+        if: steps.vendor.outputs.changed == 'true'
+        run: |
+          mkdir -p /tmp/pw
+          npm install --prefix /tmp/pw playwright@1
+          /tmp/pw/node_modules/.bin/playwright install --with-deps chromium
+          NODE_PATH=/tmp/pw/node_modules node scripts/smoke-test.cjs
+
+      - name: Commit and push
+        if: steps.vendor.outputs.changed == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m "Update @nimiq/core to ${{ steps.vendor.outputs.version }}"
+          git push
+
+      - name: Redeploy GitHub Pages
+        if: steps.vendor.outputs.changed == 'true'
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds"
+        env:
+          GH_TOKEN: ${{ github.token }}
