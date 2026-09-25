@@ -669,9 +669,9 @@ export class ClientConfiguration {
         }
     }
     /**
-     * Sets the sync mode that shoud be used.
+     * Sets the sync mode that should be used.
      * Only "light" and "pico" are supported for web clients
-     * Default is "light"
+     * Default is "pico"
      * @param {string} sync_mode
      */
     syncMode(sync_mode) {
@@ -1674,7 +1674,8 @@ export class KeyPair {
     /**
      * Parses a keypair from its hex representation.
      *
-     * Throws when the string is not valid hex format or when it represents less than 64 bytes.
+     * Throws when the string is not valid hex or does not represent a 64-byte keypair
+     * (optionally followed by a 1-byte lock-state flag, as produced by `toHex`).
      * @param {string} hex
      * @returns {KeyPair}
      */
@@ -2153,6 +2154,15 @@ export class Policy {
         return ret;
     }
     /**
+     * Returns the first block after the collateral lock-up window of a given block number has ended.
+     * @param {number} block_number
+     * @returns {number}
+     */
+    static blockAfterCollateralLockup(block_number) {
+        const ret = wasm.policy_blockAfterCollateralLockup(block_number);
+        return ret >>> 0;
+    }
+    /**
      * Returns the first block after the jail period of a given block number has ended.
      * @param {number} block_number
      * @returns {number}
@@ -2162,7 +2172,8 @@ export class Policy {
         return ret >>> 0;
     }
     /**
-     * Returns the first block after the reporting window of a given block number has ended.
+     * @deprecated Renamed to `blockAfterCollateralLockup`. Kept for API backwards compatibility;
+     * see `lastBlockOfCollateralLockup`.
      * @param {number} block_number
      * @returns {number}
      */
@@ -2300,8 +2311,42 @@ export class Policy {
         return ret !== 0;
     }
     /**
-     * Returns the block height for the last block of the reporting window of a given block number.
-     * Note: This window is meant for reporting malicious behaviour (aka `jailable` behaviour).
+     * Returns the last block height of the collateral lock-up window of a given block number.
+     *
+     * This governs the collateral lock-up: a deactivated validator's funds (and its stakers')
+     * stay locked until this block so they remain slashable while offenses could still be reported.
+     * It is kept at one epoch and must always be `>=` the equivocation reporting window
+     * (`last_block_of_equivocation_reporting_window`), so collateral is always present while an
+     * offense is still reportable.
+     * @param {number} block_number
+     * @returns {number}
+     */
+    static lastBlockOfCollateralLockup(block_number) {
+        const ret = wasm.policy_lastBlockOfCollateralLockup(block_number);
+        return ret >>> 0;
+    }
+    /**
+     * Returns the last block height at which an equivocation that happened at `block_number` can
+     * still be reported (i.e. included in a block via an equivocation proof).
+     *
+     * This is intentionally bounded by the transaction validity window so it stays within the
+     * validity-store dedup retention (`transaction_validity_window_blocks + blocks_per_batch`).
+     * Equivocation proofs are deduplicated against the validity store; if this window were longer,
+     * a genuine proof could be re-included after the dedup forgot it, re-jailing the validator and
+     * re-burning rewards. The collateral lock-up (`last_block_of_collateral_lockup`) is kept
+     * longer (one epoch) and must always be `>=` this window. See the invariant test
+     * `reporting_window_stays_within_dedup_retention`.
+     * @param {number} block_number
+     * @returns {number}
+     */
+    static lastBlockOfEquivocationReportingWindow(block_number) {
+        const ret = wasm.policy_lastBlockOfEquivocationReportingWindow(block_number);
+        return ret >>> 0;
+    }
+    /**
+     * @deprecated Renamed to `lastBlockOfCollateralLockup`. This window never governed
+     * equivocation *reporting* (that is `lastBlockOfEquivocationReportingWindow`); it has always
+     * been the collateral lock-up window. Kept for API backwards compatibility.
      * @param {number} block_number
      * @returns {number}
      */
@@ -3953,6 +3998,10 @@ export class Transaction {
      * of a transaction can be different key pairs (addresses). If no inner key pair is provided, the outer
      * key pair is used for both signatures.
      *
+     * Throws when the transaction's recipient data is not valid data for an incoming staking
+     * transaction, or when an incoming staking transaction is not sent from a basic account or
+     * a vesting contract.
+     *
      * ### Limitations
      * - HTLC redemption is not supported and will throw.
      * @param {KeyPair} key_pair
@@ -4011,16 +4060,19 @@ export class Transaction {
         return BigInt.asUintN(64, ret);
     }
     /**
-     * Verifies that a transaction has valid properties and a valid signature proof.
+     * Verifies that a transaction has valid properties and a valid signature proof for the
+     * provided `protocol_version`.
      * Optionally checks if the transaction is valid on the provided network.
      *
      * **Throws with any transaction validity error.** Returns without exception if the transaction is valid.
      *
+     * A `protocol_version` of `0` is accepted for backwards-compatible pre-upgrade validation.
      * Throws when the given networkId is unknown.
+     * @param {number} protocol_version
      * @param {number | null} [network_id]
      */
-    verify(network_id) {
-        const ret = wasm.transaction_verify(this.__wbg_ptr, isLikeNone(network_id) ? 0xFFFFFF : network_id);
+    verify(protocol_version, network_id) {
+        const ret = wasm.transaction_verify(this.__wbg_ptr, protocol_version, isLikeNone(network_id) ? 0xFFFFFF : network_id);
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
@@ -4299,6 +4351,60 @@ export class TransactionBuilder {
         return Transaction.__wrap(ret[0]);
     }
     /**
+     * Sets the signal data of a validator in the staking contract. In contrast to
+     * `newUpdateValidator`, this transaction is signed with the validator's *signing (warm) key*,
+     * so the cold key is not required to signal protocol upgrades. Pass `undefined` as
+     * `signalData` to clear the signal.
+     *
+     * The returned transaction is not yet signed. You can sign it e.g. with `tx.sign(keyPair)`.
+     *
+     * Throws when the fee does not fit within a u64 or the `networkId` is unknown.
+     * @param {Address} sender
+     * @param {Address} validator
+     * @param {string | null | undefined} signal_data
+     * @param {bigint | null | undefined} fee
+     * @param {number} validity_start_height
+     * @param {number} network_id
+     * @returns {Transaction}
+     */
+    static newSetSignalData(sender, validator, signal_data, fee, validity_start_height, network_id) {
+        _assertClass(sender, Address);
+        _assertClass(validator, Address);
+        var ptr0 = isLikeNone(signal_data) ? 0 : passStringToWasm0(signal_data, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.transactionbuilder_newSetSignalData(sender.__wbg_ptr, validator.__wbg_ptr, ptr0, len0, !isLikeNone(fee), isLikeNone(fee) ? BigInt(0) : fee, validity_start_height, network_id);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return Transaction.__wrap(ret[0]);
+    }
+    /**
+     * Signals support for the given protocol `version` with the validator's *signing (warm) key*
+     * by updating the validator's signal data in the staking contract. In contrast to
+     * `newSetSignalData`, this only updates the protocol-version bytes of the signal data and
+     * preserves the rest. To clear the signal data entirely, use `newSetSignalData` with `null`.
+     *
+     * The returned transaction is not yet signed. You can sign it e.g. with `tx.sign(keyPair)`.
+     *
+     * Throws when the fee does not fit within a u64 or the `networkId` is unknown.
+     * @param {Address} sender
+     * @param {Address} validator
+     * @param {number} version
+     * @param {bigint | null | undefined} fee
+     * @param {number} validity_start_height
+     * @param {number} network_id
+     * @returns {Transaction}
+     */
+    static newSignalVersion(sender, validator, version, fee, validity_start_height, network_id) {
+        _assertClass(sender, Address);
+        _assertClass(validator, Address);
+        const ret = wasm.transactionbuilder_newSignalVersion(sender.__wbg_ptr, validator.__wbg_ptr, version, !isLikeNone(fee), isLikeNone(fee) ? BigInt(0) : fee, validity_start_height, network_id);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return Transaction.__wrap(ret[0]);
+    }
+    /**
      * Updates a staker in the staking contract to stake for a different validator. This is a
      * signaling transaction and as such does not transfer any value.
      *
@@ -4540,7 +4646,7 @@ function __wbg_get_imports() {
             const ret = ES256Signature.__wrap(arg0);
             return ret;
         },
-        __wbg_getRandomValues_76dfc69825c9c552: function() { return handleError(function (arg0, arg1) {
+        __wbg_getRandomValues_cc7f052a444bb2ce: function() { return handleError(function (arg0, arg1) {
             globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
         }, arguments); },
         __wbg_get_1affdbdd5573b16a: function() { return handleError(function (arg0, arg1) {

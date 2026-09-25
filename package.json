@@ -6,6 +6,6 @@
     "update-nimiq-core": "node scripts/update-nimiq-core.mjs"
   },
   "dependencies": {
-    "@nimiq/core": "2.7.0"
+    "@nimiq/core": "2.22.0"
   }
 }
